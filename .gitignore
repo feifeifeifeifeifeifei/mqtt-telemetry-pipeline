@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+
+# mutmut working copy
+mutants/
+.mutmut-cache
+
+# Local broker credentials: never commit
+.env
+
+# Simulator dry-run output
+*.jsonl
+
+# Editors
+.vscode/
+.idea/
+.obsidian/
+
+# Local notes and docs
+docs/

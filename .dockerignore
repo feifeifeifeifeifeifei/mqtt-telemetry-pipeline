@@ -1,0 +1,23 @@
+.venv/
+venv/
+**/__pycache__/
+**/*.py[cod]
+.pytest_cache/
+.mutmut-cache
+tests/
+docs/
+.git/
+.gitignore
+.DS_Store
+.obsidian/
+README.md
+
+# The service image is built from requirements.txt and src/ alone. The device
+# simulator and the broker have their own images, local credentials must never
+# reach a build context, and a mutmut working copy is large.
+.env
+compose.yaml
+mosquitto/
+simulator/
+mutants/
+*.jsonl

@@ -1,0 +1,44 @@
+# Broker, service and simulator: docker compose up -d --build --wait
+#
+# Every published port is bound to 127.0.0.1: the demo broker is anonymous, so
+# neither it nor the API is reachable from outside this machine.
+services:
+  broker:
+    image: eclipse-mosquitto:2.0.22   # an exact tag: the demo must not change under you
+    ports:
+      - "127.0.0.1:1883:1883"         # the smoke test connects from the host
+    volumes:
+      - ./mosquitto/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+
+  service:
+    build: .
+    ports:
+      - "127.0.0.1:8000:8000"
+    environment:
+      MQTT_HOST: broker
+      # From .env when set there; otherwise empty, which means anonymous.
+      MQTT_USERNAME: ${MQTT_USERNAME:-}
+      MQTT_PASSWORD: ${MQTT_PASSWORD:-}
+    depends_on:
+      - broker                        # start order only: the service retries until the broker answers
+    healthcheck:
+      # Readiness, not liveness: healthy once the service has connected to the
+      # broker and subscribed. /health itself answers 200 either way. Docker
+      # does not restart an unhealthy container; the state only gates
+      # depends_on below and `up --wait`. The image has no curl, hence Python.
+      test: ["CMD", "python", "-c", "import json, sys, urllib.request; body = json.load(urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2)); sys.exit(0 if body['broker_connected'] else 1)"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  simulator:
+    build: ./simulator
+    environment:
+      MQTT_HOST: broker
+      MQTT_USERNAME: ${MQTT_USERNAME:-}
+      MQTT_PASSWORD: ${MQTT_PASSWORD:-}
+      SIM_SEED: ${SIM_SEED:-7}
+      SIM_FAULT_EVERY: ${SIM_FAULT_EVERY:-10}
+    depends_on:
+      service:
+        condition: service_healthy    # frame 0 goes out only once the service listens

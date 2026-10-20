@@ -1,0 +1,4 @@
+[tool.pytest.ini_options]
+pythonpath = ["src", "."]
+testpaths = ["tests"]
+markers = ["smoke: end-to-end test that needs a live broker on localhost:1883"]
