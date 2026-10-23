@@ -78,8 +78,10 @@ Base URL `http://localhost:8000`. Interactive docs at `/docs`.
 Packaging). Every response below is real output of this code, produced by feeding the
 default simulator stream (seed 7, first message at 08:00:00 UTC) through the service on its
 1 Hz schedule, and trimmed to a few fields where the full body would be long. Readings are
-deterministic per seed, so a live run shows the same values at the same point of the story;
-only timestamps and ages differ. The commands end in `| jq .` only to pretty-print the JSON;
+deterministic per seed and frame number, so a **freshly started** run reproduces these at
+the same point of its **first** cycle; the noise is seeded on the absolute frame number
+rather than the position in the story, so later cycles replay the same shape with different
+noise and an all-time extreme after an hour will sit outside the ones shown here. The commands end in `| jq .` only to pretty-print the JSON;
 leave it off where jq is not installed.
 
 **Current device state**, 1:40 into the story, at the peak of the video-analytics batch.
@@ -258,7 +260,7 @@ spread over seeds 1–300: noise moves a threshold crossing by a second or two.
 | At | What happens (the narration) | What the API shows |
 |---|---|---|
 | before 0:00 | the service is subscribed, the simulator not started | `system-status` returns 503 |
-| 0:00 | gateway powered on; idle, background load only | `system-status` 200 with `device_id: gateway-01`; `messages_received` climbing |
+| 0:00 | gateway powered on; idle, background load only | `system-status` 200 with `device_id: gateway-01`; `messages_received` climbing in `/health` |
 | 0:30 | video-analytics batch starts: CPU, memory and network climb | |
 | 0:40–0:41 | CPU usage above 95% for the fifth message in a row | `/anomalies`: `cpu_usage_percent` ongoing |
 | 0:57–0:58 | memory above 90% for the fifth message in a row | `memory_used_percent` ongoing |
@@ -408,13 +410,15 @@ frame number and never resets; the service does not use it.
 ### Settings
 
 The MQTT variables are the service's own, so one `.env` serves both containers; the
-simulator's own knobs carry a `SIM_` prefix. A bad value fails at startup with a
-`ValueError`, not at message 300.
+simulator's own knobs carry a `SIM_` prefix. A bad value fails at startup naming the
+variable and what it accepts, not at message 300 — and not from inside a dependency
+either: `LOG_LEVEL=WARN` used to die in uvicorn's `configure_logging` with
+`KeyError: 'warn'`, a traceback that mentions neither the variable nor the value.
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `MQTT_HOST` | `localhost` | compose sets `broker` |
-| `MQTT_PORT` | `1883` | |
+| `MQTT_HOST` | `localhost` | compose sets `broker`; empty counts as unset |
+| `MQTT_PORT` | `1883` | 1–65535; empty counts as unset |
 | `MQTT_USERNAME` | unset | unset or empty: connect anonymously |
 | `MQTT_PASSWORD` | unset | needs `MQTT_USERNAME`; a password alone fails at startup |
 | `MQTT_TOPIC` | `devices/gateway-01/telemetry` | must match the service's |
@@ -422,7 +426,7 @@ simulator's own knobs carry a `SIM_` prefix. A bad value fails at startup with a
 | `SIM_RATE_HZ` | `1` | 0.1–10; a higher rate fast-forwards the story |
 | `SIM_SEED` | `7` | any integer; same seed and settings, same readings (same bytes in a dry run with `--start`) |
 | `SIM_FAULT_EVERY` | `10` | one catalogue entry per N messages; `0` turns injection off, `1` is rejected |
-| `LOG_LEVEL` | `INFO` | |
+| `LOG_LEVEL` | `INFO` | `CRITICAL` `ERROR` `WARNING` `INFO` `DEBUG`, plus `WARN`, `FATAL` and `TRACE`; case-insensitive |
 
 Compose passes `SIM_SEED` and `SIM_FAULT_EVERY` through from the shell or `.env`, so
 `SIM_SEED=11 docker compose up -d simulator` replays the story with different noise and
@@ -530,12 +534,32 @@ payload timestamp, which the device can get wrong (three catalogue entries do), 
 against the newest message's timestamp, which freezes when the stream dies and would mean
 nothing ever goes stale.
 
-**One lock and one `try/except`.** Ingestion runs on paho's background thread while HTTP
-handlers read, so the store is guarded by a single `threading.Lock` (measured 72 ns per
-acquisition, uncontended at 1 msg/s). The only broad `except Exception` sits at the MQTT
-callback: an exception escaping it would stop the network loop while HTTP kept answering
-from a store that no longer updates, so the service would pass health checks while
-serving frozen data. What it catches is logged with the raw payload and counted in the
+**One lock, and one acquisition per response.** Ingestion runs on paho's background thread
+while HTTP handlers read, so the store is guarded by a single `threading.Lock` (measured
+72 ns per acquisition, uncontended at 1 msg/s). One lock per *method* is not enough on its
+own: `/api/v1/statistics` was assembled from thirteen separate calls — the window once,
+the running aggregate once per metric, the quality ledger once — and the writer runs
+between any two of them, so `window_filled` and `data_quality.messages_received` in the
+same JSON described different moments. Each endpoint that needs more than one value now reads
+through a single `*_snapshot` method; the two that need one number (`/health`,
+`top-temperatures`) keep a single-value accessor, which is already one acquisition. A test
+counts them on every endpoint, the 503 branch included, so it stays that way. The shared bodies
+live in `_unlocked` helpers because a public method calling another public method would
+deadlock on a lock that does not re-enter.
+
+**The clock is read after the store, not before.** `/api/v1/system-status` once reported a
+negative `age_seconds`: the handler passed `time.monotonic()` as an argument, Python
+evaluates arguments before the call, and a message stamped in between carried a later
+`received_mono`. Taking the reading first and the clock second makes that unrepresentable;
+clamping the result at zero would have left the ordering wrong and hidden the evidence.
+
+**Two broad `except Exception`, both in `ingest.py`.** The load-bearing one sits at the
+MQTT callback: an exception escaping it would stop the network loop while HTTP kept
+answering from a store that no longer updates, so the service would pass health checks
+while serving frozen data. The second guards the broker watchdog, so a failing DNS probe
+cannot kill the thread whose whole job is to explain why the broker is unreachable; it
+logs and is deliberately not counted, because a diagnostic failing is not a telemetry
+path failing. What it catches is logged with the raw payload and counted in the
 ingestor's `handler_errors` counter (not part of the API), which the smoke test requires to
 stay at zero: a non-zero count is a path validation does not cover. Two existed — an
 integer literal past Python's 4300-digit parsing limit, and JSON nested deeper than the
@@ -551,8 +575,11 @@ rejected, each because it solves a problem this project does not have:
   nothing here compiles. `paho-mqtt`, `fastapi`, `uvicorn` and `pydantic` all resolve to
   `py3-none-any` wheels and `pydantic-core` ships prebuilt `manylinux` wheels for x86_64
   and aarch64. A second stage would save only pip's cache, which `--no-cache-dir` handles.
-- **Alpine base** — musl libc means many Python packages have no wheel and compile from
-  source, reintroducing the toolchain. The ~40 MB is not worth it.
+- **Alpine base** — on musl, a package without a `musllinux` wheel compiles from source,
+  which reintroduces the toolchain. That is the general risk rather than this project's:
+  of the packages in the image only `pydantic-core` ships compiled, and it does publish a
+  `musllinux` wheel. The real reason to pass is size: the slim base is ~45 MB compressed
+  against Alpine's ~21 MB, ~115 MB more on disk, and neither is this project's problem.
 - **`tini` / `--init`** — reaps zombie child processes; this service spawns threads, not
   processes.
 
@@ -617,15 +644,16 @@ stands in for paho's message. The simulator's story, rotation, settings, dry run
 publisher are unit-tested the same way in `tests/test_simulator.py`, with a stand-in for
 paho's client.
 
-**The contract test.** `tests/test_simulator_contract.py` is the one place that imports
-both programs. It runs the real validator, store and API against the simulator's promises:
+**The contract test.** `tests/test_simulator_contract.py` is the one place that runs the
+simulator's output through the real service. (`tests/test_simulator.py` crosses the line
+too, but only to borrow `PLAUSIBLE_RANGES`.) It runs the real validator, store and API against the simulator's promises:
 every catalogue entry against its documented verdict; every frame of two full cycles, for
 ten seeds, against its label — stricter than comparing totals, since two verdicts swapped
 between frames would leave every total intact; one cycle through a real store, asserting
 one closed episode per rule (which also proves the backup burst was dropped) and
 data-quality counts derived from the catalogue rather than written as literals; the moment
-all six rules are ongoing; and every endpoint through FastAPI's test client, including the
-503 and staleness. Change either side and this file names the promise that broke.
+all six rules are ongoing; and every `/api/v1` endpoint through FastAPI's test client,
+including the 503 and staleness (`/health` is covered in `tests/test_api.py`). Change either side and this file names the promise that broke.
 
 One end-to-end smoke test (`tests/test_smoke.py`) drives the real ingestor against the
 compose broker and simulator. It skips itself when nothing is listening on port 1883, so
@@ -678,24 +706,36 @@ service drop telemetry while still answering 200 to everything — invisible fro
 side. The script therefore compares `messages_received` before and after against the
 publisher's 1 Hz.
 
-Measured on a 12-core macOS host against an earlier build of the service, with a 1 Hz
-publisher. The request path (handlers, store, statistics) has changed only in comments and
-wording since, but these figures were not re-measured on the compose stack:
+Measured on the compose stack, 12-core macOS host, 1 Hz publisher, after four hours of
+uptime so the window was full at 3600 samples. Client and server are on the same machine,
+so every request crosses Docker Desktop's port forwarding:
 
 | workers | throughput | `statistics` p50 | other endpoints p50 | errors | ingestion |
 |---:|---:|---:|---:|---:|---:|
-| 8 | 2450 req/s | 3.8 ms | 2–3 ms | 0 | 1.00/s |
-| 32 | 1799 req/s | 64.2 ms | 6–12 ms | 0 | 1.00/s |
+| 8 | 754 req/s | 14.0 ms | 6.4–9.9 ms | 0 | 1.00/s |
+| 32 | 820 req/s | 46.8 ms | 23.4–39.5 ms | 0 | 1.00/s |
 
-Ingestion held at exactly the publisher's rate in both runs — the lock did not starve the
-writer. Throughput *fell* as workers rose, which is oversubscription rather than distress:
-in those runs the container sat at ~108% CPU on a 12-core machine, so the ceiling is one
-core.
+**Ingestion held at exactly the publisher's rate in both runs**, which is the check that
+matters: the read load did not starve the writer. Latency rose roughly in proportion to
+the worker count while throughput barely moved, which is a saturated server queueing, not
+one in distress — sampled during the 32-worker run the container sat at 103–107% CPU on a
+12-core machine, so the ceiling is one core. That is the GIL, not the lock: CPython runs
+one thread of bytecode at a time whatever the host has.
 
-`/api/v1/statistics` is the only endpoint that touches the window, sorting each metric's
-samples per request. Measured in-process on that build: 0.21 ms at 300 samples, 2.30 ms at
-the full 3600; the others stayed under 0.1 ms. Its 64 ms under 32 workers was almost
-entirely queueing.
+`/api/v1/statistics` is the slowest endpoint because it is the only one that touches the
+window, sorting each metric's samples on every request. That cost scales with how full the
+window is. Replaying the simulator's own readings in-process on this host (Python 3.12,
+best of seven runs of twenty calls): 0.24 ms at 300 samples, 3.5 ms at the full 3600. The
+figure is sensitive to how sorted the samples are — Timsort exploits the smoothness of real
+telemetry, and the same measurement over uniform random values gives 4.6 ms — so read the
+ratio as the point and the absolute number as this machine's. Either way, a service that
+has just started looks considerably faster than this table.
+
+An earlier build measured 2450 req/s at 8 workers on the same host. Three things differ
+and the table above does not separate them: that run did not go through compose, its
+window was not full, and `summarise()` has since been rewritten to take the store's lock
+once instead of thirteen times. Treat the two as different experiments rather than a
+before-and-after.
 
 ## Configuration
 
@@ -703,14 +743,14 @@ The service reads these at startup:
 
 | Variable | Default |
 |---|---|
-| `MQTT_HOST` | `localhost` (compose sets `broker`) |
-| `MQTT_PORT` | `1883` |
+| `MQTT_HOST` | `localhost` (compose sets `broker`); empty counts as unset |
+| `MQTT_PORT` | `1883`; 1–65535, empty counts as unset |
 | `MQTT_USERNAME` | unset: connect anonymously |
 | `MQTT_PASSWORD` | unset; needs `MQTT_USERNAME` |
 | `MQTT_TOPIC` | `devices/gateway-01/telemetry` |
 | `API_PORT` | `8000` |
 | `API_HOST` | `0.0.0.0` |
-| `LOG_LEVEL` | `INFO` |
+| `LOG_LEVEL` | `INFO`; `CRITICAL` `ERROR` `WARNING` `INFO` `DEBUG`, plus `WARN`, `FATAL` and `TRACE`; case-insensitive |
 | `HISTORY_WINDOW` | `3600` samples |
 | `MAX_CLOCK_SKEW_SECONDS` | `60` |
 | `STALE_AFTER_SECONDS` | `30` |
@@ -769,12 +809,14 @@ dropped.
   replays the same story every four minutes; SQLite would be a drop-in replacement behind
   the same interface if persistence were required.
 - **Throughput is capped at roughly one CPU core, and the service cannot be scaled with
-  `uvicorn --workers N`.** In the load run above the container sat at ~108% CPU on a
-  12-core host: one Python process, one GIL. Adding uvicorn workers would not help and would actively
-  break correctness — the store is in-process memory, so each worker would hold its own
-  MQTT subscription and its own partial history, and they would disagree with one another.
-  This is a property of the design rather than a tuning problem, and it is the right design
-  for one device at 1 Hz: the 2450 req/s of that run is three orders of magnitude above what
+  `uvicorn --workers N`.** In the load run above the container sat at 103–107% CPU on a
+  12-core host: one Python process, one GIL. Adding uvicorn workers *would* lift that
+  ceiling — each worker is a separate OS process with its own interpreter and its own GIL —
+  but it would break correctness, which is the reason not to. The store is in-process
+  memory, so each worker would hold its own MQTT subscription and its own partial history,
+  and they would disagree with one another. This is a property of the design rather than a
+  tuning problem, and it is the right design for one device at 1 Hz: the 754 req/s measured
+  above is getting on for three orders of magnitude above what
   this service is for. Genuinely scaling it would mean moving the store out of the process,
   which is the same change as making it survive a restart.
 - Dry-run files are not pure UTF-8: the `bit-flip` line contains 0xFF on purpose. Write

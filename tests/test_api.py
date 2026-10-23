@@ -482,3 +482,32 @@ def test_each_endpoint_reads_the_store_once(endpoint):
     store._lock = CountingLock()           # type: ignore[assignment]
     assert client.get(endpoint).status_code == 200
     assert store._lock.acquisitions == 1   # type: ignore[attr-defined]
+
+
+def test_the_503_branch_also_reads_the_store_once():
+    """The empty-store path is the one that was still taking two.
+
+    record_payload_error bumps messages_received without setting _latest, so a
+    response assembled from two acquisitions could say "no telemetry received
+    yet" beside a count that had already moved on.
+    """
+    class CountingLock:
+        def __init__(self):
+            self._lock = threading.Lock()
+            self.acquisitions = 0
+
+        def __enter__(self):
+            self.acquisitions += 1
+            return self._lock.__enter__()
+
+        def __exit__(self, *exc_info):
+            return self._lock.__exit__(*exc_info)
+
+    store = TelemetryStore(history_window=50)
+    store.record_payload_error("undecodable")
+    client = TestClient(create_app(store))
+    store._lock = CountingLock()           # type: ignore[assignment]
+    response = client.get("/api/v1/system-status")
+    assert response.status_code == 503
+    assert response.json()["messages_received"] == 1
+    assert store._lock.acquisitions == 1   # type: ignore[attr-defined]

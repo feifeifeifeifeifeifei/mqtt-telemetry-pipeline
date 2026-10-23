@@ -141,7 +141,7 @@ def create_app(store: TelemetryStore, ingestor: TelemetryIngestor | None = None)
         # One acquisition for both halves: latest() then latest_per_field()
         # could straddle a write, so device_id and the readings disagreed about
         # which message they came from.
-        latest, per_field = store.status_snapshot()
+        latest, per_field, received = store.status_snapshot()
         if latest is None:
             # 503, not 200-with-nulls: a monitoring system reads 200 as success,
             # and a caller could not separate "the device has no data" from "the
@@ -152,7 +152,7 @@ def create_app(store: TelemetryStore, ingestor: TelemetryIngestor | None = None)
                 content={
                     "detail": "no telemetry received yet",
                     "broker_connected": broker_connected(),
-                    "messages_received": store.messages_received,
+                    "messages_received": received,
                     "service_uptime_seconds": uptime_seconds(),
                 },
             )

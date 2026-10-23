@@ -25,8 +25,10 @@ the store's lock (held for microseconds) and not the host.
 Two consequences worth knowing:
 
   * `/api/v1/statistics` is the only endpoint that touches the window, sorting
-    each metric's samples per request. Measured in-process: 0.21 ms at 300
-    samples, 2.30 ms at the full 3600. The others stay under 0.1 ms. Under
+    each metric's samples per request. Measured in-process on the author's
+    host, replaying the simulator's readings: 0.24 ms at 300 samples, 3.5 ms at
+    the full 3600 (README's Load section has the conditions and the caveat about
+    how much this depends on the data). The others stay under 0.1 ms. Under
     heavy concurrency its latency is almost entirely queueing, not arithmetic.
   * The service cannot be scaled with `uvicorn --workers N`. The store is
     in-process memory, so each worker would hold its own MQTT subscription and

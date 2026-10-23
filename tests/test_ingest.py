@@ -328,7 +328,7 @@ def test_an_empty_broker_variable_means_unset_not_a_crash(env):
     assert config.host == "localhost" and config.port == 1883
 
 
-@pytest.mark.parametrize("port, fragment", [("abc", "not a number"), ("0", "1-65535"), ("70000", "1-65535")])
+@pytest.mark.parametrize("port, fragment", [("abc", "not a whole number"), ("0", "1-65535"), ("70000", "1-65535")])
 def test_an_unusable_port_is_rejected_by_name(port, fragment):
     with pytest.raises(ValueError, match=fragment):
         BrokerConfig.from_env({"MQTT_PORT": port})

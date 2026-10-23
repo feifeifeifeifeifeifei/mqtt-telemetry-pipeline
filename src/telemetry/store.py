@@ -370,10 +370,17 @@ class TelemetryStore:
                 quality=self._quality_unlocked(),
             )
 
-    def status_snapshot(self) -> tuple[ValidatedMessage | None, dict[str, tuple[float, datetime, float, str]]]:
-        """The whole of /api/v1/system-status, read at one instant."""
+    def status_snapshot(self) -> tuple[ValidatedMessage | None, dict[str, tuple[float, datetime, float, str]], int]:
+        """The whole of /api/v1/system-status, read at one instant.
+
+        messages_received rides along because the 503 branch needs it, and
+        reading it separately there put the two halves of that response a write
+        apart: record_payload_error bumps the count without setting _latest, so
+        a response could say "no telemetry received yet" beside a count that had
+        already moved.
+        """
         with self._lock:
-            return self._latest, dict(self._latest_per_field)
+            return self._latest, dict(self._latest_per_field), self._received
 
     def anomaly_snapshot(self) -> tuple[list[Episode], int, int]:
         """Episodes with the evaluation count they were drawn from.

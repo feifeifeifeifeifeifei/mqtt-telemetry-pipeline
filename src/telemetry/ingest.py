@@ -59,7 +59,10 @@ class BrokerConfig:
         try:
             port = int(port_raw)
         except ValueError:
-            raise ValueError(f"MQTT_PORT={port_raw!r} is not a number") from None
+            # Same wording as simulator.config._number: one .env, two readers,
+            # and a message that differs between them sends the reader looking
+            # for a difference that is not there.
+            raise ValueError(f"MQTT_PORT={port_raw!r} is not a whole number") from None
         if not 1 <= port <= 65535:
             raise ValueError(f"MQTT_PORT={port} is outside 1-65535")
         config = cls(

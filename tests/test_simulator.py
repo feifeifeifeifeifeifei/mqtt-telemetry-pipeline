@@ -634,3 +634,41 @@ def test_the_simulator_image_pins_the_same_paho_as_the_service():
     service = paho(root / "requirements.txt")
     assert len(service) == 1 and service[0].startswith("paho-mqtt=="), service   # one exact pin
     assert paho(root / "simulator" / "requirements.txt") == service
+
+
+# --------------------------------------- the two programs read one .env alike
+
+
+@pytest.mark.parametrize(
+    "env",
+    [
+        {},
+        {"MQTT_HOST": ""},
+        {"MQTT_HOST": "   "},
+        {"MQTT_PORT": ""},
+        {"MQTT_HOST": "broker", "MQTT_PORT": "1884"},
+    ],
+)
+def test_both_programs_read_the_same_broker_settings(env):
+    """One `.env` serves both containers, so they must not disagree about it.
+
+    The simulator used to take `MQTT_PORT=0` and `MQTT_HOST=""` happily and
+    then spin for ever without connecting, while the service rejected the same
+    values by name at startup. README documents one set of rules for both.
+    """
+    from telemetry.ingest import BrokerConfig
+
+    service = BrokerConfig.from_env(env)
+    simulator = Config.from_env({**env, "SIM_DEVICE_ID": "gateway-01"})
+    assert (simulator.host, simulator.port) == (service.host, service.port)
+
+
+@pytest.mark.parametrize("port", ["0", "70000", "-1", "abc"])
+def test_both_programs_reject_the_same_ports_with_the_same_message(port):
+    from telemetry.ingest import BrokerConfig
+
+    with pytest.raises(ValueError) as service_error:
+        BrokerConfig.from_env({"MQTT_PORT": port})
+    with pytest.raises(ValueError) as simulator_error:
+        Config.from_env({"MQTT_PORT": port, "SIM_DEVICE_ID": "gateway-01"})
+    assert str(simulator_error.value) == str(service_error.value)
