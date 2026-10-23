@@ -48,10 +48,15 @@ def _median(sorted_values: list[float]) -> float:
 
 
 def summarise(store: TelemetryStore) -> dict[str, Any]:
-    window = store.window()
+    # One snapshot, not window() + running() x 11 + quality(). Those thirteen
+    # acquisitions let the 1 Hz writer run between any two, so window_filled and
+    # data_quality.messages_received in the same response came from different
+    # moments. Everything below is computed from the snapshot, outside the lock.
+    snapshot = store.statistics_snapshot()
+    window = snapshot.window
     metrics: dict[str, Any] = {}
     for metric in PLAUSIBLE_RANGES:
-        running = store.running(metric)
+        running = snapshot.running.get(metric)
         if running is None:
             continue
         values = sorted(
@@ -76,10 +81,10 @@ def summarise(store: TelemetryStore) -> dict[str, Any]:
         # A sample count, not a duration: the window is deque(maxlen=N), which is
         # an hour only while messages arrive at the documented 1 Hz. Naming it
         # window_seconds would assert a cadence this service does not control.
-        "window_samples": store.window_capacity(),
+        "window_samples": snapshot.capacity,
         "window_filled": len(window),
         "metrics": metrics,
-        "data_quality": store.quality(),
+        "data_quality": snapshot.quality,
     }
 
 

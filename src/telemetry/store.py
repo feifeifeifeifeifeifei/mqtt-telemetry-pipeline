@@ -11,6 +11,18 @@ method takes one lock AND returns a snapshot. Holding the lock while building a
 value is not enough: handing back a live deque, aggregate or dict lets the caller
 read it after the lock releases, which is the torn read this design exists to
 prevent.
+
+One lock per method is necessary but not sufficient. A response assembled from
+several of them is still torn - the writer runs between the calls, so the fields
+disagree about when they were read. The `*_snapshot` methods exist for exactly
+that: one acquisition, every value a single endpoint needs. Reach for them when
+a handler would otherwise call two accessors, and keep the single-value
+accessors for the cases that genuinely want one number.
+
+The `_unlocked` helpers are the other half of that rule. A public method must
+never call another public method - the lock is a plain threading.Lock and does
+not re-enter - so shared bodies live in a private helper that assumes the lock
+is already held.
 """
 from __future__ import annotations
 
@@ -148,6 +160,16 @@ class _FieldQuality:
     accepted: int = 0
     rejected: int = 0
     reasons: collections.Counter[str] = field(default_factory=collections.Counter)
+
+
+@dataclass(frozen=True)
+class StatisticsSnapshot:
+    """Everything summarise() needs, read under one acquisition."""
+
+    window: list[ValidatedMessage]
+    capacity: int
+    running: dict[str, RunningStats]
+    quality: dict[str, Any]
 
 
 class TelemetryStore:
@@ -304,23 +326,62 @@ class TelemetryStore:
         with self._lock:
             return self._received
 
+    def _quality_unlocked(self) -> dict[str, Any]:
+        """The body of quality(). Caller must already hold the lock."""
+        return {
+            "messages_received": self._received,
+            "messages_undecodable": self._undecodable,
+            "messages_wrong_shape": self._wrong_shape,
+            "per_field": {
+                name: {
+                    "accepted": q.accepted,
+                    "rejected": q.rejected,
+                    "reasons": dict(q.reasons),
+                }
+                for name, q in self._quality.items()
+            },
+            "cross_field": {
+                TIMESTAMP_SUBSTITUTED: self._cross_field[TIMESTAMP_SUBSTITUTED],
+                **{key: self._cross_field[key] for key in CROSS_FIELD_KEYS.values()},
+            },
+            "recent_rejections": [dict(entry) for entry in self._recent],
+        }
+
     def quality(self) -> dict[str, Any]:
         with self._lock:
-            return {
-                "messages_received": self._received,
-                "messages_undecodable": self._undecodable,
-                "messages_wrong_shape": self._wrong_shape,
-                "per_field": {
-                    name: {
-                        "accepted": q.accepted,
-                        "rejected": q.rejected,
-                        "reasons": dict(q.reasons),
-                    }
-                    for name, q in self._quality.items()
-                },
-                "cross_field": {
-                    TIMESTAMP_SUBSTITUTED: self._cross_field[TIMESTAMP_SUBSTITUTED],
-                    **{key: self._cross_field[key] for key in CROSS_FIELD_KEYS.values()},
-                },
-                "recent_rejections": [dict(entry) for entry in self._recent],
-            }
+            return self._quality_unlocked()
+
+    # ------------------------------------------------------------- snapshots
+    # One acquisition per response. Assembling an endpoint from the individual
+    # accessors above is what torn reads look like in practice: /statistics
+    # used to take the lock thirteen times - window once, running once per
+    # metric, quality once - and the writer runs at 1 Hz between any two of
+    # them, so window_filled and data_quality.messages_received in the same
+    # JSON described different moments. That contradicts this module's own
+    # opening paragraph, which is how it was found.
+
+    def statistics_snapshot(self) -> StatisticsSnapshot:
+        with self._lock:
+            return StatisticsSnapshot(
+                # list(deque) is atomic at the C level; see window().
+                window=list(self._history),
+                capacity=self._window_size,
+                running={metric: replace(stats) for metric, stats in self._running.items()},
+                quality=self._quality_unlocked(),
+            )
+
+    def status_snapshot(self) -> tuple[ValidatedMessage | None, dict[str, tuple[float, datetime, float, str]]]:
+        """The whole of /api/v1/system-status, read at one instant."""
+        with self._lock:
+            return self._latest, dict(self._latest_per_field)
+
+    def anomaly_snapshot(self) -> tuple[list[Episode], int, int]:
+        """Episodes with the evaluation count they were drawn from.
+
+        Separately these three could disagree: an empty episode list beside an
+        evaluated count that had already moved on reads as stronger evidence of
+        calm than it is, which is the opposite of what messages_evaluated is
+        documented to provide.
+        """
+        with self._lock:
+            return self._detector.episodes(), self._evaluated, self._detector.discarded

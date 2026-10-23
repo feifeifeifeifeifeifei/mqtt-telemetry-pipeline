@@ -313,18 +313,41 @@ def test_reads_during_writes_neither_raise_nor_lose_updates():
     over it was never contended. Removing all thirteen lock acquisitions passed
     it. Rejecting a field on every message is what makes a missing lock show up
     as "deque mutated during iteration".
+
+    What this catches, measured by neutralising each acquisition one at a time:
+    record(), quality() and statistics_snapshot() - the three that iterate a
+    container in Python and therefore raise when it mutates underneath them.
+    The rest return a scalar or a C-level dict()/list() copy, so dropping their
+    lock produces a torn *value*, not an exception, and no amount of churn in
+    this test will turn one into a failure. Those are covered by
+    test_a_statistics_response_is_internally_consistent_under_load below, which
+    asserts across fields instead of waiting for a crash. Saying so here
+    because a test whose real coverage is narrower than it looks is the exact
+    defect this suite was once shipped with.
     """
     store = TelemetryStore(history_window=200, recent_rejections=20)
     errors: list[BaseException] = []
     stop = threading.Event()
     total = 5000
 
+    # Rotating which field is rejected makes _running, _latest_per_field and
+    # _extremes gain keys *while they are being read*, not only at the start.
+    # With a fixed set the dicts were fully populated after message one and
+    # removing the lock from record_payload_error, latest() or
+    # latest_per_field() went unnoticed.
+    rotating = ["cpu_usage_percent", "memory_used_percent", "disk_usage_percent",
+                "network_rx_kbps", "battery_percent"]
+
     def writer():
         try:
             for index in range(1, total + 1):
-                store.record(
-                    message(index, cpu_temperature_c=80.0 + index % 7, gpu_temperature_c=-273.15)
-                )
+                overrides = {"cpu_temperature_c": 80.0 + index % 7,
+                             "gpu_temperature_c": -273.15}
+                if index <= 400:
+                    overrides[rotating[index % len(rotating)]] = "bad"
+                store.record(message(index, **overrides))
+                if index % 50 == 0:
+                    store.record_payload_error("undecodable")
         except BaseException as exc:      # noqa: BLE001 - recorded, then asserted on
             errors.append(exc)
         finally:
@@ -333,11 +356,22 @@ def test_reads_during_writes_neither_raise_nor_lose_updates():
     def reader():
         try:
             while not stop.is_set():
+                # Every public read, so a lock dropped from any one of them is
+                # a failing test rather than a comment nobody checks.
                 store.window()
                 store.running("cpu_temperature_c")
                 store.quality()
                 store.anomalies()
                 store.latest_per_field()
+                store.latest()
+                store.extremes("cpu_temperature_c")
+                store.last_uptime()
+                store.messages_evaluated()
+                store.episodes_discarded()
+                _ = store.messages_received
+                store.statistics_snapshot()
+                store.status_snapshot()
+                store.anomaly_snapshot()
         except BaseException as exc:      # noqa: BLE001
             errors.append(exc)
 
@@ -350,7 +384,12 @@ def test_reads_during_writes_neither_raise_nor_lose_updates():
 
     assert errors == []
     assert store.running("cpu_temperature_c").count == total
-    assert store.messages_received == total
+    # total records plus one payload error every 50th message. Asserting the
+    # sum rather than `total` is what makes a lock dropped from
+    # record_payload_error show up as a lost increment.
+    undecodable = total // 50
+    assert store.messages_received == total + undecodable
+    assert store.quality()["messages_undecodable"] == undecodable
     assert store.quality()["per_field"]["gpu_temperature_c"]["rejected"] == total
 
 
@@ -384,3 +423,108 @@ def test_a_non_qualifying_reading_returns_before_allocating(monkeypatch):
 
     tracker.update(999.0, moment)         # qualifies for highest
     assert built == 1
+
+
+# ------------------------------------------------- one acquisition per response
+
+
+class _CountingLock:
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self.acquisitions = 0
+
+    def __enter__(self):
+        self.acquisitions += 1
+        return self._lock.__enter__()
+
+    def __exit__(self, *exc_info):
+        return self._lock.__exit__(*exc_info)
+
+
+@pytest.mark.parametrize(
+    "method, expected",
+    [
+        # Literals, not len(PLAUSIBLE_RANGES): deriving the number from the
+        # code would make the test agree with whatever the code did. The point
+        # is that one response reads the store once. statistics_snapshot used
+        # to be thirteen calls in summarise(), and the writer runs at 1 Hz
+        # between any two of them.
+        ("statistics_snapshot", 1),
+        ("status_snapshot", 1),
+        ("anomaly_snapshot", 1),
+    ],
+)
+def test_a_snapshot_takes_the_lock_exactly_once(method, expected):
+    store = TelemetryStore(history_window=50)
+    for index in range(1, 6):
+        store.record(message(index))
+    store._lock = _CountingLock()          # type: ignore[assignment]
+    getattr(store, method)()
+    assert store._lock.acquisitions == expected   # type: ignore[attr-defined]
+
+
+def test_a_snapshot_is_detached_from_the_store():
+    """A snapshot the caller can mutate is the torn read with extra steps."""
+    store = TelemetryStore(history_window=50)
+    store.record(message(1))
+    snapshot = store.statistics_snapshot()
+    snapshot.window.clear()
+    snapshot.running["cpu_temperature_c"].count = -1
+    snapshot.quality["messages_received"] = -1
+    assert len(store.statistics_snapshot().window) == 1
+    assert store.statistics_snapshot().running["cpu_temperature_c"].count == 1
+    assert store.quality()["messages_received"] == 1
+
+
+def test_a_statistics_response_is_internally_consistent_under_load():
+    """Torn reads do not raise; they disagree. So assert across fields.
+
+    Within one snapshot two things must hold however hard the writer runs:
+    every per-metric all_time.count was folded in from a message that was also
+    counted in messages_received, and the window cannot hold more samples than
+    its capacity. Assembling the response from separate acquisitions breaks the
+    first of those - the counts are read after messages_received and can
+    overtake it.
+    """
+    store = TelemetryStore(history_window=200, recent_rejections=20)
+    errors: list[BaseException] = []
+    violations: list[str] = []
+    stop = threading.Event()
+    total = 4000
+
+    def writer():
+        try:
+            for index in range(1, total + 1):
+                store.record(message(index, gpu_temperature_c=-273.15))
+        except BaseException as exc:      # noqa: BLE001
+            errors.append(exc)
+        finally:
+            stop.set()
+
+    def reader():
+        try:
+            while not stop.is_set():
+                snapshot = store.statistics_snapshot()
+                received = snapshot.quality["messages_received"]
+                for metric, stats in snapshot.running.items():
+                    if stats.count > received:
+                        violations.append(
+                            f"{metric}.count {stats.count} > messages_received {received}"
+                        )
+                if len(snapshot.window) > snapshot.capacity:
+                    violations.append(
+                        f"window {len(snapshot.window)} > capacity {snapshot.capacity}"
+                    )
+        except BaseException as exc:      # noqa: BLE001
+            errors.append(exc)
+
+    threads = [threading.Thread(target=writer)] + [
+        threading.Thread(target=reader) for _ in range(3)
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=30)
+
+    assert errors == []
+    assert violations == [], violations[:5]

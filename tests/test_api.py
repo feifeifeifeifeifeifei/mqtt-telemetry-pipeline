@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import threading
 import time
 from datetime import datetime, timedelta, timezone
 
@@ -417,3 +418,67 @@ def test_main_defaults_to_port_8000_on_all_interfaces(monkeypatch):
         monkeypatch.delenv(name, raising=False)
     main.main()
     assert (captured["port"], captured["host"], captured["log_level"]) == (8000, "0.0.0.0", "info")
+
+
+# ------------------------------------------------- one read, one clock, one lock
+
+
+def test_age_seconds_cannot_go_negative_when_a_write_lands_mid_request():
+    """The clock must be read after the store, not passed in as an argument.
+
+    Python evaluates arguments before the call, so `_readings_payload(store,
+    time.monotonic(), ...)` stamped "now" and only then went looking for the
+    readings - and the 1 Hz writer gets in between, with a later received_mono.
+    The response then carried `"age_seconds": -0.2`. Clamping with max(0.0, …)
+    would have hidden it with the ordering still wrong, so this test pins the
+    ordering instead.
+    """
+    class RacingStore(TelemetryStore):
+        def status_snapshot(self):
+            # Stand in for the writer thread, deterministically.
+            time.sleep(0.05)
+            self.record(_message())
+            return super().status_snapshot()
+
+    def _message():
+        return validate_payload(
+            json.dumps(dict(BASE, timestamp="2026-10-19T12:00:00Z")).encode(),
+            datetime(2026, 10, 19, 12, 0, 0, tzinfo=timezone.utc), time.monotonic(),
+        )
+
+    store = RacingStore(history_window=50)
+    store.record(_message())
+    body = TestClient(create_app(store)).get("/api/v1/system-status").json()
+    ages = [r["age_seconds"] for r in body["readings"].values() if r["age_seconds"] is not None]
+    assert ages, "expected at least one field to report an age"
+    assert min(ages) >= 0.0, f"negative age_seconds: {min(ages)}"
+
+
+@pytest.mark.parametrize(
+    "endpoint",
+    ["/api/v1/statistics", "/api/v1/system-status", "/api/v1/anomalies"],
+)
+def test_each_endpoint_reads_the_store_once(endpoint):
+    """One response, one acquisition - otherwise its fields describe different moments."""
+    class CountingLock:
+        def __init__(self):
+            self._lock = threading.Lock()
+            self.acquisitions = 0
+
+        def __enter__(self):
+            self.acquisitions += 1
+            return self._lock.__enter__()
+
+        def __exit__(self, *exc_info):
+            return self._lock.__exit__(*exc_info)
+
+    store = TelemetryStore(history_window=50)
+    for _ in range(3):
+        store.record(validate_payload(
+            json.dumps(dict(BASE, timestamp="2026-10-19T12:00:00Z")).encode(),
+            datetime(2026, 10, 19, 12, 0, 0, tzinfo=timezone.utc), time.monotonic(),
+        ))
+    client = TestClient(create_app(store))
+    store._lock = CountingLock()           # type: ignore[assignment]
+    assert client.get(endpoint).status_code == 200
+    assert store._lock.acquisitions == 1   # type: ignore[attr-defined]

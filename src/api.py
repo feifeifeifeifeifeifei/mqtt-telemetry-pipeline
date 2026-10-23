@@ -42,7 +42,7 @@ class Component(str, Enum):
 
 
 def _readings_payload(
-    store: TelemetryStore, now_mono: float, stale_after: float
+    latest: dict[str, tuple[float, datetime, float, str]], stale_after: float
 ) -> tuple[dict[str, Any], datetime | None]:
     """Freshest valid value per field, in one of three states.
 
@@ -50,8 +50,15 @@ def _readings_payload(
     absent key means "no data" or "not a field". A stale field keeps its real
     age: "the last value was 412 s ago" is far more useful than "no value", and
     it distinguishes a briefly flapping field from a dead one.
+
+    Takes the snapshot rather than the store, and reads the clock itself,
+    afterwards. The caller used to pass time.monotonic() as an argument, which
+    Python evaluates before the call - so the writer could stamp a message with
+    a later received_mono in between and age_seconds came out negative.
+    Ordering it this way makes that unrepresentable; clamping with max(0.0, ...)
+    would only have hidden it.
     """
-    latest = store.latest_per_field()
+    now_mono = time.monotonic()
     readings: dict[str, Any] = {}
     newest: datetime | None = None
     for field in PLAUSIBLE_RANGES:
@@ -131,7 +138,10 @@ def create_app(store: TelemetryStore, ingestor: TelemetryIngestor | None = None)
     # Response, which FastAPI would otherwise try to build a response model from.
     @app.get("/api/v1/system-status", response_model=None)
     def system_status() -> dict[str, Any] | JSONResponse:
-        latest = store.latest()
+        # One acquisition for both halves: latest() then latest_per_field()
+        # could straddle a write, so device_id and the readings disagreed about
+        # which message they came from.
+        latest, per_field = store.status_snapshot()
         if latest is None:
             # 503, not 200-with-nulls: a monitoring system reads 200 as success,
             # and a caller could not separate "the device has no data" from "the
@@ -146,7 +156,7 @@ def create_app(store: TelemetryStore, ingestor: TelemetryIngestor | None = None)
                     "service_uptime_seconds": uptime_seconds(),
                 },
             )
-        readings, newest = _readings_payload(store, time.monotonic(), STALE_AFTER_SECONDS)
+        readings, newest = _readings_payload(per_field, STALE_AFTER_SECONDS)
         ages = [r["age_seconds"] for r in readings.values() if r["age_seconds"] is not None]
         return {
             "device_id": latest.device_id,
@@ -165,14 +175,18 @@ def create_app(store: TelemetryStore, ingestor: TelemetryIngestor | None = None)
 
     @app.get("/api/v1/anomalies")
     def anomalies() -> dict[str, Any]:
+        # One acquisition: an episode list read at one moment beside an
+        # evaluated count read at another makes an empty list look like
+        # stronger evidence of calm than it is.
+        episodes, evaluated, discarded = store.anomaly_snapshot()
         return {
-            "anomalies": [episode.as_dict() for episode in store.anomalies()],
+            "anomalies": [episode.as_dict() for episode in episodes],
             # Shipped so the endpoint is self-describing: a caller sees all six
             # watched metrics with thresholds and reasoning, not only the ones
             # firing, and an empty list stops being ambiguous.
             "rules": [rule.as_dict() for rule in RULES],
-            "messages_evaluated": store.messages_evaluated(),
-            "episodes_discarded": store.episodes_discarded(),
+            "messages_evaluated": evaluated,
+            "episodes_discarded": discarded,
         }
 
     return app
