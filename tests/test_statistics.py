@@ -5,7 +5,13 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from telemetry.statistics import UnknownComponentError, summarise, top_temperatures
+from telemetry.statistics import (
+    UnknownComponentError,
+    _median,
+    _percentile,
+    summarise,
+    top_temperatures,
+)
 from telemetry.store import TelemetryStore
 from telemetry.validation import validate_payload
 
@@ -165,3 +171,42 @@ def test_extremes_survive_window_eviction():
     result = top_temperatures(store, "cpu")
     assert result["highest"][0]["value"] == 95.0
     assert result["lowest"][0]["value"] == 60.0
+
+
+# --------------------------------------------- the load test's own definitions
+# scripts/stress_test.py is stdlib-only and talks to a running service over
+# HTTP, so it cannot import this module and keeps its own copy of the two
+# definitions. A previous project shipped with the copies disagreeing - the
+# service on nearest-rank, the script on floor - and the README's latency table
+# was built from the wrong one. Nothing caught it, because the script had no
+# tests. This is that test.
+
+
+def _load_stress_test_module():
+    import importlib.util
+    import pathlib as _pathlib
+
+    path = _pathlib.Path(__file__).resolve().parent.parent / "scripts" / "stress_test.py"
+    spec = importlib.util.spec_from_file_location("stress_test_under_test", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+@pytest.mark.parametrize("fraction", [0.5, 0.95, 0.99, 1.0])
+@pytest.mark.parametrize("n", [1, 2, 19, 20, 21, 99, 100, 101, 3599, 3600, 3601])
+def test_the_load_test_reports_the_same_percentile_as_the_service(fraction, n):
+    # These sizes are not arbitrary: floor and ceil agree everywhere except
+    # where fraction * n is a whole number, which is exactly 20, 100 and 3600
+    # here. A test that only used round numbers like 50 would pass either way.
+    stress = _load_stress_test_module()
+    values = [float(i) for i in range(n)]
+    assert stress.percentile(values, fraction) == _percentile(sorted(values), fraction)
+
+
+@pytest.mark.parametrize("n", [1, 2, 3, 4, 100, 101])
+def test_the_load_test_reports_the_same_median_as_the_service(n):
+    # Even n is where statistics.median invents a value that never occurred.
+    stress = _load_stress_test_module()
+    values = [float(i) for i in range(n)]
+    assert stress.median(values) == _median(sorted(values))

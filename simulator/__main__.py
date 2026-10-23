@@ -31,10 +31,28 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
+_STDLIB_LEVEL = {
+    "CRITICAL": "CRITICAL", "FATAL": "CRITICAL", "ERROR": "ERROR",
+    "WARNING": "WARNING", "WARN": "WARNING", "INFO": "INFO",
+    "DEBUG": "DEBUG",
+    "TRACE": "DEBUG",           # accepted for symmetry with the service
+}
+
+
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
+    # Same vocabulary problem as the service, minus uvicorn: logging rejects
+    # TRACE outright and an empty string (what compose sends for an unset
+    # variable) with ValueError: Unknown level. Resolve it rather than letting
+    # a logging traceback be the first thing a reader sees.
+    raw = (os.environ.get("LOG_LEVEL", "").strip() or "INFO").upper()
+    if raw not in _STDLIB_LEVEL:
+        raise SystemExit(
+            f"LOG_LEVEL={raw!r} is not a level this simulator accepts. "
+            f"Use one of: {', '.join(sorted(_STDLIB_LEVEL))}"
+        )
     logging.basicConfig(
-        level=os.environ.get("LOG_LEVEL", "INFO").upper(),
+        level=_STDLIB_LEVEL[raw],
         format="%(asctime)s %(levelname)-8s %(name)s %(message)s",
         stream=sys.stderr,      # in a dry run, stdout carries nothing but data
     )

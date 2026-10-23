@@ -224,18 +224,30 @@ def test_messages_evaluated_excludes_payloads_the_detector_never_saw():
 
 
 def test_as_of_is_the_newest_component_not_the_lexicographically_largest():
+    # The rejected cpu_temperature_c is what makes this test bite. Without it
+    # the second message overwrites every field, _latest_per_field holds one
+    # distinct timestamp, and the comparison has nothing to get wrong - the
+    # first version of this test did exactly that and passed with the bug
+    # reinstated. Rejecting the field in the LATER message leaves it pinned to
+    # the whole second while the rest move on, so the two formats must be
+    # compared against each other.
     store = TelemetryStore(history_window=100)
     whole = validate_payload(
-        json.dumps(dict(BASE, timestamp="2026-10-19T12:00:00Z", cpu_temperature_c="97.64")).encode(),
+        json.dumps(dict(BASE, timestamp="2026-10-19T12:00:00Z")).encode(),
         datetime(2026, 10, 19, 12, 0, 0, tzinfo=timezone.utc), time.monotonic(),
     )
     fractional = validate_payload(
-        json.dumps(dict(BASE, timestamp="2026-10-19T12:00:00.500Z")).encode(),
+        json.dumps(dict(BASE, timestamp="2026-10-19T12:00:00.500Z", cpu_temperature_c="97.64")).encode(),
         datetime(2026, 10, 19, 12, 0, 0, 500000, tzinfo=timezone.utc), time.monotonic(),
     )
     store.record(whole)
     store.record(fractional)
+    assert "cpu_temperature_c" not in fractional.readings   # the pin, not a side effect
     body = TestClient(create_app(store)).get("/api/v1/system-status").json()
+    # cpu_temperature_c still reads 12:00:00; every other field reads 12:00:00.500.
+    assert body["readings"]["cpu_temperature_c"]["as_of"] == "2026-10-19T12:00:00Z"
+    # "Z" (0x5A) sorts after "." (0x2E), so maxing the formatted strings picks
+    # the whole second. Comparing datetimes picks the fractional one.
     assert body["as_of"] == "2026-10-19T12:00:00.500000Z"
 
 
@@ -351,6 +363,49 @@ def test_main_honours_the_documented_environment(monkeypatch):
     assert captured["port"] == 9999
     assert captured["host"] == "127.0.0.1"
     assert captured["log_level"] == "debug"
+
+
+@pytest.mark.parametrize(
+    "value, stdlib, uvicorn_level",
+    [
+        # The two that used to kill startup. Upper-casing for logging and
+        # lower-casing for uvicorn is not enough on its own: the two accept
+        # overlapping but different vocabularies. WARN is a logging alias
+        # uvicorn has never had; TRACE is a uvicorn level logging rejects.
+        ("WARN", "WARNING", "warning"),
+        ("warn", "WARNING", "warning"),
+        ("TRACE", "DEBUG", "trace"),
+        ("FATAL", "CRITICAL", "critical"),
+        ("info", "INFO", "info"),
+        ("DEBUG", "DEBUG", "debug"),
+        # compose sends an unset variable through as "", which has to mean
+        # "unset", the same rule BrokerConfig applies to MQTT_USERNAME.
+        ("", "INFO", "info"),
+        ("  ", "INFO", "info"),
+    ],
+)
+def test_every_accepted_log_level_reaches_both_consumers(monkeypatch, value, stdlib, uvicorn_level):
+    import main
+
+    captured = {}
+    monkeypatch.setattr(main.uvicorn, "run", lambda app, **kw: captured.update(**kw))
+    monkeypatch.setattr(main.logging, "basicConfig", lambda **kw: captured.update(stdlib=kw["level"]))
+    monkeypatch.setenv("LOG_LEVEL", value)
+    main.main()
+    # Spelled out rather than read from main's own tables, which would pass
+    # whatever the tables said.
+    assert captured["stdlib"] == stdlib
+    assert captured["log_level"] == uvicorn_level
+
+
+def test_an_unusable_log_level_fails_at_startup_naming_the_variable(monkeypatch):
+    import main
+
+    monkeypatch.setattr(main.uvicorn, "run", lambda app, **kw: pytest.fail("should not start"))
+    monkeypatch.setenv("LOG_LEVEL", "VERBOSE")
+    with pytest.raises(SystemExit) as excinfo:
+        main.main()
+    assert "LOG_LEVEL" in str(excinfo.value) and "VERBOSE" in str(excinfo.value)
 
 
 def test_main_defaults_to_port_8000_on_all_interfaces(monkeypatch):

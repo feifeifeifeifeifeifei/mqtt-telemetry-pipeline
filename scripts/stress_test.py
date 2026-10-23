@@ -39,6 +39,7 @@ from __future__ import annotations
 import argparse
 import collections
 import json
+import math
 import statistics
 import threading
 import time
@@ -131,8 +132,27 @@ def worker(base: str, deadline: float, interval: float, timeout: float, out: lis
 
 
 def percentile(values: list[float], fraction: float) -> float:
+    """Nearest-rank, ceil(fraction * n) 1-based.
+
+    Must stay the same definition as telemetry.statistics._percentile. This
+    script is stdlib-only and talks to the service over HTTP, so it cannot
+    import it; the duplication is deliberate and this comment is the link.
+    int() is floor, which agrees everywhere except where fraction * n is an
+    integer - every 20th sample size at p95 - and lands one rank high there.
+    """
     ordered = sorted(values)
-    return ordered[min(int(fraction * len(ordered)), len(ordered) - 1)]
+    index = max(math.ceil(fraction * len(ordered)) - 1, 0)
+    return ordered[min(index, len(ordered) - 1)]
+
+
+def median(values: list[float]) -> float:
+    """median_low, matching telemetry.statistics._median.
+
+    statistics.median averages the two middle values on an even-length sample,
+    reporting a latency that never occurred - and these samples are even far
+    more often than not.
+    """
+    return statistics.median_low(values)
 
 
 def main() -> int:
@@ -181,7 +201,7 @@ def main() -> int:
             continue
         times = [r.seconds * 1000 for r in rows]
         errors = sum(1 for r in rows if r.status != 200)
-        print(f"  {endpoint:<44}{len(rows):>7}{statistics.median(times):>8.1f}ms"
+        print(f"  {endpoint:<44}{len(rows):>7}{median(times):>8.1f}ms"
               f"{percentile(times, 0.95):>8.1f}ms{percentile(times, 0.99):>8.1f}ms"
               f"{max(times):>8.1f}ms{errors:>8}")
 

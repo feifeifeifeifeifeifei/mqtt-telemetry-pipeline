@@ -493,9 +493,10 @@ side by side also means a disagreement between them exposes historical contamina
 heap.** `top-temperatures` reports the all-time 3 highest and lowest, so it cannot read
 from the 1-hour window — an extreme from two hours ago would silently age out. A dedicated
 tracker keeps 6 readings per metric, O(1) memory, immune to eviction. Insertion compares
-against the current third place and exits in one comparison when the value does not
-qualify, which is almost every reading: over an hour of the simulator's stream,
-98% of CPU temperature readings change neither list. Speed is not the reason for the
+against the current third place of each list — two comparisons — and returns before
+allocating anything when the value qualifies for neither, which is almost every reading:
+over an hour of the simulator's stream, 98% of CPU temperature readings change neither
+list. Speed is not the reason for the
 design, though — at 1 Hz any approach is free. The reason to prefer it is that highest and
 lowest share one code path by flipping a comparison, where a heap needs value negation for
 the lower half, and the list stays sorted so reading the answer out is free. This does not

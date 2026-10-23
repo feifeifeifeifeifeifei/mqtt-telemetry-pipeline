@@ -317,3 +317,35 @@ def test_the_logged_payload_is_truncated(caplog):
         ingestor.on_message(None, None, FakeMessage(padded))
     assert repr(padded[:200]) in caplog.text
     assert repr(padded[:201]) not in caplog.text
+
+
+@pytest.mark.parametrize("env", [{"MQTT_HOST": ""}, {"MQTT_HOST": "   "}, {"MQTT_PORT": ""}])
+def test_an_empty_broker_variable_means_unset_not_a_crash(env):
+    # compose turns an unset variable into an empty string. "" reached
+    # int() and raised at import time, before the lifespan hook the 503
+    # design depends on; "" as a host got as far as paho's "Invalid host".
+    config = BrokerConfig.from_env(env)
+    assert config.host == "localhost" and config.port == 1883
+
+
+@pytest.mark.parametrize("port, fragment", [("abc", "not a number"), ("0", "1-65535"), ("70000", "1-65535")])
+def test_an_unusable_port_is_rejected_by_name(port, fragment):
+    with pytest.raises(ValueError, match=fragment):
+        BrokerConfig.from_env({"MQTT_PORT": port})
+
+
+def test_the_watchdog_names_a_hostname_that_does_not_resolve():
+    # The failure that broke a live demo: a container recreated onto a
+    # different network, where the service goes quiet and paho logs one DEBUG
+    # line that reads the same as a refused port.
+    config = BrokerConfig(host="no-such-broker.invalid", port=1883,
+                          username=None, password=None, topic="t")
+    reason = TelemetryIngestor(TelemetryStore(history_window=10), config)._diagnose()
+    assert "does not resolve" in reason and "no-such-broker.invalid" in reason
+
+
+def test_the_watchdog_tells_a_closed_port_apart_from_an_unresolvable_name():
+    config = BrokerConfig(host="127.0.0.1", port=9, username=None, password=None, topic="t")
+    reason = TelemetryIngestor(TelemetryStore(history_window=10), config)._diagnose()
+    assert "does not resolve" not in reason
+    assert "127.0.0.1:9" in reason

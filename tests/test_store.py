@@ -352,3 +352,35 @@ def test_reads_during_writes_neither_raise_nor_lose_updates():
     assert store.running("cpu_temperature_c").count == total
     assert store.messages_received == total
     assert store.quality()["per_field"]["gpu_temperature_c"]["rejected"] == total
+
+
+def test_a_non_qualifying_reading_returns_before_allocating(monkeypatch):
+    """Pins the claim the docstring and the README both make.
+
+    The first version of this class had no `return` in `update` at all while
+    both documents promised one, which is the shape of defect this project has
+    shipped before: prose describing an optimisation the code does not contain.
+    Counting constructions is the only way to tell the two apart, because the
+    answers are identical either way.
+    """
+    import telemetry.store as store_module
+
+    built = 0
+    real = store_module.TemperatureReading
+
+    def counting(*args, **kwargs):
+        nonlocal built
+        built += 1
+        return real(*args, **kwargs)
+
+    moment = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    tracker = store_module.TopKTracker()
+    for value in (102.0, 101.0, 100.0, 0.0, 1.0, 2.0):   # fill both lists
+        tracker.update(value, moment)
+    monkeypatch.setattr(store_module, "TemperatureReading", counting)
+
+    tracker.update(50.0, moment)          # between the two lists: qualifies for neither
+    assert built == 0, "a reading that qualifies for neither list must not be allocated"
+
+    tracker.update(999.0, moment)         # qualifies for highest
+    assert built == 1
