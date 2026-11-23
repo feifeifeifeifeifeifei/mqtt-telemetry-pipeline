@@ -190,9 +190,10 @@ def test_an_integer_over_the_parser_digit_limit_raises_undecodable():
 
 def test_a_recursion_error_from_the_decoder_raises_undecodable(monkeypatch):
     # How deep the C decoder can go is not a fixed number. Before 3.14 it counts
-    # levels; 3.14 measures the C stack, so 100_000 levels raise on Windows (1 MB
-    # stack) and parse on Linux (8 MB). Rather than hunt for a depth that fails
-    # everywhere, simulate the error: what this test pins is the mapping.
+    # levels; 3.14 measures the C stack, so 100_000 levels raise on Windows (the
+    # interpreter reserves about 3 MB of stack) and parse on Linux (8 MB by
+    # default). Rather than hunt for a depth that fails everywhere, simulate the
+    # error: what this test pins is the mapping.
     def too_deep(_payload):
         raise RecursionError("maximum recursion depth exceeded while decoding a JSON array")
 
