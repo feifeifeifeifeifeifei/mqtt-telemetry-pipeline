@@ -65,19 +65,28 @@ def test_a_truncated_payload_is_counted_not_raised(pair):
     assert ingestor.handler_errors == 0
 
 
-@pytest.mark.parametrize(
-    "payload",
-    [b'{"uptime_seconds": ' + b"9" * 4301 + b"}", b"[" * 100_000 + b"]" * 100_000],
-    ids=["integer-over-4300-digits", "nested-100000-deep"],
-)
-def test_a_payload_json_loads_refuses_is_counted_as_undecodable(pair, payload):
-    # Both fail inside json.loads with something other than JSONDecodeError.
-    # Had that escaped validation, the catch-all would only bump handler_errors
-    # and the message would never appear in messages_received at all.
+def test_an_integer_json_loads_refuses_is_counted_as_undecodable(pair):
+    # Past Python's 4300-digit int limit json.loads raises a plain ValueError,
+    # not a JSONDecodeError. Had that escaped validation, the catch-all would
+    # only bump handler_errors and the message would never be counted at all.
     store, ingestor = pair
-    ingestor.on_message(None, None, FakeMessage(payload))
+    ingestor.on_message(None, None, FakeMessage(b'{"uptime_seconds": ' + b"9" * 4301 + b"}"))
     assert store.messages_received == 1
     assert store.quality()["messages_undecodable"] == 1
+    assert ingestor.handler_errors == 0
+
+
+def test_json_nested_100000_deep_is_counted_whatever_the_decoder_does(pair):
+    # Whether the C decoder copes with 100_000 levels depends on the version and
+    # the platform: 3.14 limits it by stack size, so it raises RecursionError on
+    # Windows and parses on Linux. Either way the message must be counted - as
+    # undecodable, or, once parsed into a list, as wrong-shape - and must never
+    # reach the catch-all.
+    store, ingestor = pair
+    ingestor.on_message(None, None, FakeMessage(b"[" * 100_000 + b"]" * 100_000))
+    quality = store.quality()
+    assert store.messages_received == 1
+    assert quality["messages_undecodable"] + quality["messages_wrong_shape"] == 1
     assert ingestor.handler_errors == 0
 
 

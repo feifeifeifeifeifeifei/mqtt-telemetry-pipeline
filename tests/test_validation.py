@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 
 import pytest
 
@@ -184,14 +185,19 @@ def test_an_integer_over_the_parser_digit_limit_raises_undecodable():
     assert type(excinfo.value.__cause__) is ValueError
 
 
-def test_json_nested_past_the_recursion_limit_raises_undecodable():
-    # The C decoder recurses once per bracket and gives up with RecursionError.
-    # 100_000 levels is far past the limit on 3.11 (the image) and on 3.14.
-    deep = b"[" * 100_000 + b"]" * 100_000
+def test_a_recursion_error_from_the_decoder_raises_undecodable(monkeypatch):
+    # How deep the C decoder can go is not a fixed number. Before 3.14 it counts
+    # levels; 3.14 measures the C stack, so 100_000 levels raise on Windows (1 MB
+    # stack) and parse on Linux (8 MB). Rather than hunt for a depth that fails
+    # everywhere, simulate the error: what this test pins is the mapping.
+    def too_deep(_payload):
+        raise RecursionError("maximum recursion depth exceeded while decoding a JSON array")
+
+    monkeypatch.setattr("telemetry.validation.json", SimpleNamespace(loads=too_deep))
     with pytest.raises(PayloadError) as excinfo:
-        validate(with_raw_value("cpu_usage_percent", deep))
+        validate(payload())
     assert excinfo.value.reason == "undecodable"
-    assert isinstance(excinfo.value.__cause__, RecursionError)
+    assert type(excinfo.value.__cause__) is RecursionError
 
 
 @pytest.mark.parametrize("value", [10**400, int("9" * 4300)], ids=["401-digits", "4300-digits"])
