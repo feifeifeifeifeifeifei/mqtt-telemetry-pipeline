@@ -685,12 +685,15 @@ has seen — so its test quality is worth checking rather than assuming. The sco
 deliberately that one module: it is pure, with no I/O, clock or threads, so the run takes
 about a second per full suite pass.
 
-Mutation testing earned its keep in earlier runs. It is what identified
-`value.replace("Z", "+00:00")` as dead code — two mutants of that call survived, which is
-the signature of a line that cannot affect behaviour, and `datetime.fromisoformat` has
-parsed a trailing `Z` natively since 3.11. It also caught a test asserting
-`len(raw) == MAX_RAW_REPR`, which compares the code against its own constant and therefore
-verifies nothing.
+CI currently reports 143 mutants, 143 killed. Mutation testing has earned its keep more
+than once. Its first run in CI found two survivors that turn `astimezone(timezone.utc)`
+into `astimezone(None)`: on a runner whose clock is UTC, local time is UTC, so no test
+could tell them apart. Two tests now switch the process to UTC+05:30 and check that
+timestamps still come out in UTC. Earlier runs identified `value.replace("Z", "+00:00")`
+as dead code — two mutants of that call survived, which is the signature of a line that
+cannot affect behaviour, and `datetime.fromisoformat` has parsed a trailing `Z` natively
+since 3.11 — and caught a test asserting `len(raw) == MAX_RAW_REPR`, which compares the
+code against its own constant and therefore verifies nothing.
 
 **CI runs all of this on every push** ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)):
 the full suite on Python 3.11, 3.12, 3.13 and 3.14; the quick-start compose stack, checking
