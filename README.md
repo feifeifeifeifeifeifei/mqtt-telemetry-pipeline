@@ -659,8 +659,9 @@ including the 503 and staleness (`/health` is covered in `tests/test_api.py`). C
 
 One end-to-end smoke test (`tests/test_smoke.py`) drives the real ingestor against the
 compose broker and simulator. It skips itself when nothing is listening on port 1883, so
-on a machine with no Docker pytest reports it as skipped and everything else passes. To
-run it:
+on a machine with no Docker pytest reports it as skipped and everything else passes. (On
+Windows two time-zone tests are skipped as well: they need `time.tzset()`, which only
+exists on Linux and macOS.) To run it:
 
 ```bash
 docker compose up -d --build --wait
