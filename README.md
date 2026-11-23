@@ -1,5 +1,7 @@
 # mqtt-telemetry-pipeline
 
+[![CI](https://github.com/feifeifeifeifeifeifei/mqtt-telemetry-pipeline/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/feifeifeifeifeifeifei/mqtt-telemetry-pipeline/actions/workflows/ci.yml)
+
 A small end-to-end telemetry pipeline. A simulated edge gateway publishes system telemetry
 over MQTT; a Python service subscribes, validates every reading, keeps statistics, groups
 threshold violations into anomaly episodes and serves all of it over a small REST API. A
@@ -689,6 +691,12 @@ the signature of a line that cannot affect behaviour, and `datetime.fromisoforma
 parsed a trailing `Z` natively since 3.11. It also caught a test asserting
 `len(raw) == MAX_RAW_REPR`, which compares the code against its own constant and therefore
 verifies nothing.
+
+**CI runs all of this on every push** ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)):
+the full suite on Python 3.11, 3.12, 3.13 and 3.14; the quick-start compose stack, checking
+that the service container answers `/api/v1/system-status` with the simulator's telemetry
+and that the smoke test actually ran rather than skipped (pytest exits 0 when its only test
+is skipped); and mutmut over `validation.py`, which fails on any mutant that is not killed.
 
 ## Load
 
