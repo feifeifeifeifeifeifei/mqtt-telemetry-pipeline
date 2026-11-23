@@ -18,6 +18,7 @@ jobs:
   tests:
     name: tests (Python ${{ matrix.python-version }})
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     strategy:
       fail-fast: false
       matrix:
@@ -38,6 +39,7 @@ jobs:
   stack:
     name: compose stack and smoke test
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
@@ -54,7 +56,7 @@ jobs:
       - name: The service in the container receives the simulator's telemetry
         run: |
           for attempt in $(seq 1 30); do
-            if curl -fsS http://127.0.0.1:8000/api/v1/system-status -o status.json \
+            if curl -fsS --max-time 5 http://127.0.0.1:8000/api/v1/system-status -o status.json \
               && python -c "import json, sys; body = json.load(open('status.json')); sys.exit(0 if body['device_id'] == 'gateway-01' else 1)"; then
               echo "system-status answered 200 for gateway-01 after ${attempt} attempt(s)"
               exit 0
@@ -62,7 +64,7 @@ jobs:
             sleep 1
           done
           echo "system-status did not answer 200 for gateway-01 within 30 s:"
-          curl -sS http://127.0.0.1:8000/api/v1/system-status || true
+          curl -sS --max-time 5 http://127.0.0.1:8000/api/v1/system-status || true
           exit 1
       - name: Smoke test against the running stack
         run: python -m pytest -m smoke -q --junitxml=smoke.xml
@@ -93,6 +95,7 @@ jobs:
   mutation:
     name: mutation testing (validation.py)
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
