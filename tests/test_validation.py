@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import os
+import time
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
@@ -23,6 +25,7 @@ from telemetry.validation import (
     SOURCE_PAYLOAD,
     SOURCE_UNPARSEABLE,
     isoformat_z,
+    parse_timestamp,
     validate_payload,
 )
 
@@ -431,3 +434,42 @@ def test_an_accepted_non_utc_timestamp_is_stored_as_utc():
     assert result.timestamp_source == SOURCE_PAYLOAD
     assert result.timestamp.utcoffset() == timedelta(0)
     assert isoformat_z(result.timestamp).endswith("Z")
+
+
+@pytest.fixture
+def host_clock_not_utc():
+    """Run the test with the process's local time zone at UTC+05:30.
+
+    Containers and CI runners default to UTC, where local time and UTC are the
+    same thing, so a stray astimezone() without a zone passes every test there.
+    A POSIX TZ string needs no time-zone database. Windows has no time.tzset(),
+    so the tests using this fixture are skipped there.
+    """
+    if not hasattr(time, "tzset"):
+        pytest.skip("time.tzset() is POSIX-only")
+    previous = os.environ.get("TZ")
+    os.environ["TZ"] = "IST-5:30"
+    time.tzset()
+    try:
+        assert time.localtime().tm_gmtoff == 5 * 3600 + 30 * 60
+        yield
+    finally:
+        if previous is None:
+            del os.environ["TZ"]
+        else:
+            os.environ["TZ"] = previous
+        time.tzset()
+
+
+def test_isoformat_z_ignores_the_host_time_zone(host_clock_not_utc):
+    moment = datetime(2026, 10, 19, 16, 0, tzinfo=timezone(timedelta(hours=8)))
+    assert isoformat_z(moment) == "2026-10-19T08:00:00Z"
+
+
+def test_a_parsed_timestamp_comes_back_in_utc_whatever_the_host_time_zone(host_clock_not_utc):
+    received_at = datetime(2026, 10, 19, 8, 0, 30, tzinfo=timezone.utc)
+    parsed, source = parse_timestamp("2026-10-19T16:00:00+08:00", received_at)
+    assert source == SOURCE_PAYLOAD
+    assert parsed == datetime(2026, 10, 19, 8, 0, tzinfo=timezone.utc)
+    # Equality compares instants and would hold at +05:30 too, so check the zone itself.
+    assert parsed.utcoffset() == timedelta(0)
