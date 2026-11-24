@@ -38,6 +38,7 @@ from typing import Any
 
 from telemetry.anomalies import AnomalyDetector, Episode
 from telemetry.validation import (
+    FLAG_DEVICE_ID_MISMATCH,
     FLAG_MEMORY_INCONSISTENT,
     FLAG_UPTIME_REGRESSED,
     PLAUSIBLE_RANGES,
@@ -59,6 +60,7 @@ TRACKED_TEMPERATURES = ("cpu_temperature_c", "gpu_temperature_c")
 CROSS_FIELD_KEYS = {
     FLAG_MEMORY_INCONSISTENT: "memory_inconsistent",
     FLAG_UPTIME_REGRESSED: "uptime_regressed",
+    FLAG_DEVICE_ID_MISMATCH: "device_id_mismatch",
 }
 TIMESTAMP_SUBSTITUTED = "timestamp_substituted"
 

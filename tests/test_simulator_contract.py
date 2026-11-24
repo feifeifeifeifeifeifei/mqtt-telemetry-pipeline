@@ -119,6 +119,7 @@ def test_one_cycle_through_the_real_store():
         + verdicts["timestamp:receipt-unparseable"],
         "memory_inconsistent": verdicts["flag:memory-inconsistent"],
         "uptime_regressed": 1,      # the firmware reboot at tick 180
+        "device_id_mismatch": 0,    # feed() has no topic, so nothing to compare
     }
 
     rejected = Counter()

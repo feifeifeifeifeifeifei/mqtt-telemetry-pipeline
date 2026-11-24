@@ -9,6 +9,7 @@ from types import SimpleNamespace
 import pytest
 
 from telemetry.validation import (
+    FLAG_DEVICE_ID_MISMATCH,
     FLAG_MEMORY_INCONSISTENT,
     MAX_CLOCK_SKEW_SECONDS,
     MAX_RAW_REPR,
@@ -295,6 +296,59 @@ def test_uptime_moving_forward_is_not_flagged():
     assert result.consistency_flags == ()
 
 
+# ----------------------------------------------------- payload id vs topic id
+
+
+@pytest.mark.parametrize(
+    "payload_id",
+    ["gateway-02", "Gateway-01", "gateway-01 ", ""],
+    ids=["other-device", "other-case", "trailing-space", "empty"],
+)
+def test_a_payload_id_that_differs_from_the_topic_is_flagged_and_kept(payload_id):
+    result = validate(payload(device_id=payload_id), topic_device_id="gateway-01")
+    assert result.consistency_flags == (FLAG_DEVICE_ID_MISMATCH,)
+    # Flagged, not replaced, and nothing else is lost: the topic already
+    # decides where the message is stored, so the payload's claim is reported.
+    assert result.device_id == payload_id
+    assert set(result.readings) == set(PLAUSIBLE_RANGES)
+
+
+def test_a_payload_id_that_matches_the_topic_is_not_flagged():
+    assert validate(payload(), topic_device_id="gateway-01").consistency_flags == ()
+
+
+@pytest.mark.parametrize(
+    "value", [ABSENT, None, 17, ["gateway-02"]], ids=["missing", "null", "int", "list"]
+)
+def test_a_missing_or_non_string_payload_id_is_not_flagged(value):
+    # No id the payload could be wrong about. 17 != "gateway-01" is True, so
+    # this is what fails if the comparison ever sees the raw value.
+    result = validate(payload(device_id=value), topic_device_id="gateway-01")
+    assert result.consistency_flags == ()
+
+
+def test_without_a_topic_id_nothing_is_compared():
+    # The default: callers with no topic, such as the simulator contract tests.
+    assert validate(payload(device_id="gateway-02")).consistency_flags == ()
+    assert validate(payload(device_id="gateway-02"), topic_device_id=None).consistency_flags == ()
+
+
+def test_a_mismatch_is_reported_alongside_the_other_flags():
+    result = validate(
+        payload(device_id="gateway-02", uptime_seconds=10),
+        previous_uptime=500.0,
+        topic_device_id="gateway-01",
+    )
+    assert result.consistency_flags == (FLAG_UPTIME_REGRESSED, FLAG_DEVICE_ID_MISMATCH)
+
+
+def test_topic_device_id_is_keyword_only():
+    # Positional, "gateway-01" would be one slip away from landing in
+    # previous_uptime.
+    with pytest.raises(TypeError):
+        validate_payload(payload(), RECEIVED_AT, RECEIVED_MONO, None, "gateway-01")
+
+
 # --------------------------------------------------------- contract surfaces
 # These pin the values that cross the wire. Every test above compares against
 # the imported constants, so without this the constants are only self-consistent
@@ -314,6 +368,10 @@ def test_timestamp_sources_and_flags_are_the_documented_wire_values():
     assert (FLAG_MEMORY_INCONSISTENT, FLAG_UPTIME_REGRESSED) == (
         "memory-inconsistent", "uptime-regressed",
     )
+
+
+def test_the_device_id_mismatch_flag_is_the_documented_wire_value():
+    assert FLAG_DEVICE_ID_MISMATCH == "device-id-mismatch"
 
 
 def test_plausible_ranges_match_the_documented_table():

@@ -51,6 +51,7 @@ SOURCE_IMPLAUSIBLE = "receipt-implausible"
 
 FLAG_MEMORY_INCONSISTENT = "memory-inconsistent"
 FLAG_UPTIME_REGRESSED = "uptime-regressed"
+FLAG_DEVICE_ID_MISMATCH = "device-id-mismatch"
 
 MEMORY_TOLERANCE_POINTS = 1.5
 MAX_RAW_REPR = 60
@@ -163,12 +164,18 @@ def parse_timestamp(value: Any, received_at: datetime) -> tuple[datetime, str]:
 
 
 def _consistency_flags(
-    readings: dict[str, float], previous_uptime: float | None
+    readings: dict[str, float],
+    previous_uptime: float | None,
+    device_id: str | None,
+    topic_device_id: str | None,
 ) -> tuple[str, ...]:
     """Cross-field checks: structurally valid values that are wrong relative to each other.
 
-    Both flag rather than substitute, because neither has a trusted alternative
-    the way the timestamp has our own receipt clock.
+    All of them flag rather than substitute. Memory and uptime have no trusted
+    alternative the way the timestamp has our own receipt clock. The device id
+    does - the topic - but the topic already decides which device the message
+    is stored under, so overwriting the payload's claim would only hide the
+    disagreement.
     """
     flags: list[str] = []
     used = readings.get("memory_used_mb")
@@ -182,6 +189,11 @@ def _consistency_flags(
         # The device rebooted. That is an event, not corrupt data, so nothing is
         # discarded - it is only counted.
         flags.append(FLAG_UPTIME_REGRESSED)
+    # device_id is already None unless the payload carried a string, so a
+    # missing or non-string id is never compared; a None topic id means the
+    # caller has no topic to compare against.
+    if device_id is not None and topic_device_id is not None and device_id != topic_device_id:
+        flags.append(FLAG_DEVICE_ID_MISMATCH)
     return tuple(flags)
 
 
@@ -190,6 +202,8 @@ def validate_payload(
     received_at: datetime,
     received_mono: float,
     previous_uptime: float | None = None,
+    *,
+    topic_device_id: str | None = None,
 ) -> ValidatedMessage:
     try:
         decoded = json.loads(payload)
@@ -236,5 +250,5 @@ def validate_payload(
         received_mono=received_mono,
         sequence=sequence,
         device_id=device_id,
-        consistency_flags=_consistency_flags(readings, previous_uptime),
+        consistency_flags=_consistency_flags(readings, previous_uptime, device_id, topic_device_id),
     )

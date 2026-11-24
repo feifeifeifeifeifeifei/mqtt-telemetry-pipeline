@@ -211,6 +211,20 @@ def test_an_uptime_regression_reaches_the_cross_field_counter():
     assert store.quality()["cross_field"]["uptime_regressed"] == 1
 
 
+def test_a_device_id_mismatch_reaches_the_cross_field_counter():
+    # The helper never passes topic_device_id, so build the flagged message here.
+    store = TelemetryStore(history_window=10)
+    body = dict(BASE, device_id="gateway-02")
+    store.record(message(1))
+    store.record(validate_payload(json.dumps(body).encode(), START, 2.0, topic_device_id="gateway-01"))
+    assert store.quality()["cross_field"] == {
+        "timestamp_substituted": 0,
+        "memory_inconsistent": 0,
+        "uptime_regressed": 0,
+        "device_id_mismatch": 1,
+    }
+
+
 def test_messages_evaluated_excludes_payloads_the_detector_never_saw():
     store = filled([80.0, 81.0], history_window=10)
     store.record_payload_error("undecodable")
