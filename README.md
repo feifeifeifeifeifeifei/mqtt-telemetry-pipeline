@@ -53,10 +53,10 @@ On Windows PowerShell 5.1 type `curl.exe`: plain `curl` there is an alias for
 `Invoke-WebRequest`. A browser on `http://localhost:8000/docs` works everywhere.
 
 The broker image ships the mosquitto command-line clients, so watching the raw stream needs
-nothing installed:
+nothing installed. The `+` matches any device id, and `-v` prints each message's topic:
 
 ```bash
-docker compose exec broker mosquitto_sub -t devices/gateway-01/telemetry -v
+docker compose exec broker mosquitto_sub -t devices/+/telemetry -v
 ```
 
 `docker compose stop simulator` followed by a 30-second wait shows every reading go stale;
@@ -75,6 +75,21 @@ Base URL `http://localhost:8000`. Interactive docs at `/docs`.
 | `GET` | `/api/v1/statistics` | Per metric: all-time count/min/max/mean/stdev + windowed median/p95, plus window capacity/fill and `data_quality` | — |
 | `GET` | `/api/v1/statistics/top-temperatures?component=cpu\|gpu` | All-time 3 highest and 3 lowest readings with timestamps | `422` on an unknown component |
 | `GET` | `/api/v1/anomalies` | Threshold violations grouped into episodes, plus the active rule set | — |
+| `GET` | `/api/v1/devices` | Every device heard from, with its message count, seconds since its last message and a `stale` flag; plus the device limit and the messages no device took | — |
+| `GET` | `/api/v1/devices/{device_id}/system-status` | As `/api/v1/system-status`, for one device | `404`, `422`; `503` before any telemetry from it |
+| `GET` | `/api/v1/devices/{device_id}/statistics` | As `/api/v1/statistics`, for one device | `404`, `422` |
+| `GET` | `/api/v1/devices/{device_id}/statistics/top-temperatures?component=cpu\|gpu` | As `/api/v1/statistics/top-temperatures`, for one device | `404`, `422` |
+| `GET` | `/api/v1/devices/{device_id}/anomalies` | As `/api/v1/anomalies`, for one device | `404`, `422` |
+
+Messages on `devices/<id>/telemetry` belong to device `<id>`, and each device's state is kept
+apart. A path with `{device_id}` answers `404` `{"detail": "unknown device: <id>"}` for a
+device the service holds no state for, and `422` for an id that cannot be a device id: 1–64
+letters, digits, `.`, `_` or `-`, starting with a letter or digit. The four `/api/v1` paths
+without a device in them came first and answer for one device, `DEFAULT_DEVICE_ID`
+(`gateway-01`, the simulator), exactly as its `/api/v1/devices/gateway-01/...` routes do;
+`/docs` marks them deprecated. Until that device's first message they answer as an empty
+service does: `503` from `system-status`, empty results from the rest. `messages_received`
+in `/health` counts every message the service received, including those no device took.
 
 `/health` exists so compose can wait for readiness instead of sleeping a fixed time (see
 Packaging). Every response below is real output of this code, produced by feeding the
@@ -147,7 +162,8 @@ curl -s localhost:8000/api/v1/statistics | jq .
     "per_field": {
       "cpu_temperature_c": {"accepted": 233, "rejected": 2, "reasons": {"out-of-range": 2}}
     },
-    "cross_field": {"timestamp_substituted": 4, "memory_inconsistent": 1, "uptime_regressed": 1},
+    "cross_field": {"timestamp_substituted": 4, "memory_inconsistent": 1, "uptime_regressed": 1,
+                    "device_id_mismatch": 0},
     "recent_rejections": [
       {"at": "2026-10-19T08:00:43Z", "field": "cpu_usage_percent", "raw": "'99.29'",
        "reason": "not-a-number"},
@@ -161,9 +177,10 @@ curl -s localhost:8000/api/v1/statistics | jq .
 Every count under `data_quality` can be read off the fault catalogue below: one cycle holds
 24 catalogue slots, which put three undecodable payloads, two batched arrays, four bad
 timestamps and one stale memory counter on the wire, and the firmware reboot at 3:00 adds
-the `uptime_regressed`. The two `recent_rejections` shown (13 after a full cycle) are two
-more catalogue entries: a number sent as text, and a boolean in a numeric field. The raw
-value is kept verbatim so the cause reads off directly.
+the `uptime_regressed`. `device_id_mismatch` counts payloads whose `device_id` is not the
+device their topic names; the simulator never sends one. The two `recent_rejections` shown
+(13 after a full cycle) are two more catalogue entries: a number sent as text, and a
+boolean in a numeric field. The raw value is kept verbatim so the cause reads off directly.
 
 **Temperature extremes**, all-time and unaffected by window eviction — the highest from the
 batch peak, the lowest from the idle stretch:
@@ -423,8 +440,8 @@ either: `LOG_LEVEL=WARN` used to die in uvicorn's `configure_logging` with
 | `MQTT_PORT` | `1883` | 1–65535; empty counts as unset |
 | `MQTT_USERNAME` | unset | unset or empty: connect anonymously |
 | `MQTT_PASSWORD` | unset | needs `MQTT_USERNAME`; a password alone fails at startup |
-| `MQTT_TOPIC` | `devices/gateway-01/telemetry` | must match the service's |
-| `SIM_DEVICE_ID` | `gateway-01` | must not be empty |
+| `MQTT_TOPIC` | `devices/+/telemetry` | the service's filter; the simulator publishes to it with the `+` replaced by `SIM_DEVICE_ID`, and to a topic without `+` as it is |
+| `SIM_DEVICE_ID` | `gateway-01` | 1–64 letters, digits, `.`, `_` or `-`, starting with a letter or digit; empty counts as unset |
 | `SIM_RATE_HZ` | `1` | 0.1–10; a higher rate fast-forwards the story |
 | `SIM_SEED` | `7` | any integer; same seed and settings, same readings (same bytes in a dry run with `--start`) |
 | `SIM_FAULT_EVERY` | `10` | one catalogue entry per N messages; `0` turns injection off, `1` is rejected |
@@ -436,8 +453,8 @@ different fault positions.
 
 ## Design decisions
 
-**FastAPI and uvicorn, with sync handlers.** Five read-only `GET` endpoints, one query
-parameter, no request bodies, no auth — almost any framework would do. FastAPI is chosen
+**FastAPI and uvicorn, with sync handlers.** Ten read-only `GET` endpoints, one query and
+one path parameter, no request bodies, no auth — almost any framework would do. FastAPI is chosen
 for three things actually used here: query-parameter validation from a type annotation, so
 `?component=tpu` returns a 422 naming the allowed values with **zero** validation code of
 our own; a generated `/docs` page, which is a working test console for anyone trying the
@@ -536,18 +553,23 @@ payload timestamp, which the device can get wrong (three catalogue entries do), 
 against the newest message's timestamp, which freezes when the stream dies and would mean
 nothing ever goes stale.
 
-**One lock, and one acquisition per response.** Ingestion runs on paho's background thread
-while HTTP handlers read, so the store is guarded by a single `threading.Lock` (measured
-72 ns per acquisition, uncontended at 1 msg/s). One lock per *method* is not enough on its
-own: `/api/v1/statistics` was assembled from thirteen separate calls — the window once,
-the running aggregate once per metric, the quality ledger once — and the writer runs
-between any two of them, so `window_filled` and `data_quality.messages_received` in the
-same JSON described different moments. Each endpoint that needs more than one value now reads
-through a single `*_snapshot` method; the two that need one number (`/health`,
-`top-temperatures`) keep a single-value accessor, which is already one acquisition. A test
-counts them on every endpoint, the 503 branch included, so it stays that way. The shared bodies
-live in `_unlocked` helpers because a public method calling another public method would
-deadlock on a lock that does not re-enter.
+**One lock per device, and one acquisition of it per response.** Ingestion runs on paho's
+background thread while HTTP handlers read, so each device's store is guarded by its own
+`threading.Lock` (measured 72 ns per acquisition, uncontended at 1 msg/s). One lock per
+*method* is not enough on its own: `/api/v1/statistics` was assembled from thirteen separate
+calls — the window once, the running aggregate once per metric, the quality ledger once —
+and the writer runs between any two of them, so `window_filled` and
+`data_quality.messages_received` in the same JSON described different moments. Each
+endpoint that needs more than one value from a store now reads through a single
+`*_snapshot` method, and `top-temperatures`, which needs one, keeps a single-value accessor,
+which is already one acquisition. So a response takes each device's lock at most once: a
+device's endpoints read only its store, and `/api/v1/devices` reads each store's count and
+last-seen time together. A test counts them on every endpoint, the 503 branch included, so
+it stays that way. The registry that maps ids to stores and the fleet-wide counters behind
+`/health` have a lock each, and no code holds one of these locks while taking another, so
+there is no lock order to get wrong. The shared bodies live in `_unlocked` helpers because
+a public method calling another public method would deadlock on a lock that does not
+re-enter.
 
 **The clock is read after the store, not before.** `/api/v1/system-status` once reported a
 negative `age_seconds`: the handler passed `time.monotonic()` as an argument, Python
@@ -641,20 +663,20 @@ python3 -m venv .venv
 programs are under `.venv/Scripts/`.)
 
 **Every test but the smoke test runs without a broker.** Unit tests cover each module on
-its own: `on_message` takes an object with a `.payload` attribute, so a three-line fake
-stands in for paho's message. The simulator's story, rotation, settings, dry run and
-publisher are unit-tested the same way in `tests/test_simulator.py`, with a stand-in for
-paho's client.
+its own: `on_message` reads only `.topic` and `.payload`, so a small fake stands in for
+paho's message. The simulator's story, rotation, settings, dry run and publisher are
+unit-tested the same way in `tests/test_simulator.py`, with a stand-in for paho's client.
 
 **The contract test.** `tests/test_simulator_contract.py` is the one place that runs the
 simulator's output through the real service. (`tests/test_simulator.py` crosses the line
-too, but only to borrow `PLAUSIBLE_RANGES`.) It runs the real validator, store and API against the simulator's promises:
+too, but only to borrow `PLAUSIBLE_RANGES` and to check that both programs read one `.env`
+alike.) It runs the real validator, store and API against the simulator's promises:
 every catalogue entry against its documented verdict; every frame of two full cycles, for
 ten seeds, against its label — stricter than comparing totals, since two verdicts swapped
 between frames would leave every total intact; one cycle through a real store, asserting
 one closed episode per rule (which also proves the backup burst was dropped) and
 data-quality counts derived from the catalogue rather than written as literals; the moment
-all six rules are ongoing; and every `/api/v1` endpoint through FastAPI's test client,
+all six rules are ongoing; and the default device's endpoints through FastAPI's test client,
 including the 503 and staleness (`/health` is covered in `tests/test_api.py`). Change either side and this file names the promise that broke.
 
 One end-to-end smoke test (`tests/test_smoke.py`) drives the real ingestor against the
@@ -710,13 +732,13 @@ With the stack up (on Windows the interpreter is `python`, not `python3`):
 python3 scripts/stress_test.py --duration 30 --concurrency 8
 ```
 
-Standard library only, so it runs without installing anything. It rotates through all five
-endpoints from several workers and reports per-endpoint latency, but the check that matters
-is the ingestion one: **every endpoint takes the same non-reentrant lock the MQTT ingest
-thread needs**, so a read-heavy load could in principle starve the writer and make the
-service drop telemetry while still answering 200 to everything — invisible from the HTTP
-side. The script therefore compares `messages_received` before and after against the
-publisher's 1 Hz.
+Standard library only, so it runs without installing anything. It rotates through `/health`
+and the four default-device endpoints from several workers and reports per-endpoint
+latency, but the check that matters is the ingestion one: **every endpoint takes a
+non-reentrant lock the MQTT ingest thread also needs**, so a read-heavy load could in
+principle starve the writer and make the service drop telemetry while still answering 200
+to everything — invisible from the HTTP side. The script therefore compares
+`messages_received` before and after against the publisher's 1 Hz.
 
 Measured on the compose stack, 12-core macOS host, 1 Hz publisher, after four hours of
 uptime so the window was full at 3600 samples. Client and server are on the same machine,
@@ -759,7 +781,9 @@ The service reads these at startup:
 | `MQTT_PORT` | `1883`; 1–65535, empty counts as unset |
 | `MQTT_USERNAME` | unset: connect anonymously |
 | `MQTT_PASSWORD` | unset; needs `MQTT_USERNAME` |
-| `MQTT_TOPIC` | `devices/gateway-01/telemetry` |
+| `MQTT_TOPIC` | `devices/+/telemetry`; the subscription filter, whose `+` level is the device id, so `devices/gw-07/telemetry` is device `gw-07`. Exactly one `+` level and no `#`, or the service fails at startup; empty counts as unset |
+| `MAX_DEVICES` | `32`; a whole number, at least 1. Messages from devices beyond it are counted and dropped, with one warning in the log; empty counts as unset |
+| `DEFAULT_DEVICE_ID` | `gateway-01`; the device the `/api/v1` paths without a device in them answer for. A value that is not a device id fails at startup; empty counts as unset |
 | `API_PORT` | `8000` |
 | `API_HOST` | `0.0.0.0` |
 | `LOG_LEVEL` | `INFO`; `CRITICAL` `ERROR` `WARNING` `INFO` `DEBUG`, plus `WARN`, `FATAL` and `TRACE`; case-insensitive |
@@ -806,11 +830,15 @@ dropped.
 - Each cycle closes six episodes, 90 an hour, so the 1000-episode history fills after about
   11 hours. From then on the oldest are dropped and `episodes_discarded` counts them; a cap
   that truncated silently would read as complete coverage.
-- Both sides default to the topic `devices/gateway-01/telemetry`. Changing `SIM_DEVICE_ID`
-  does not change the topic, and compose passes only the credentials, `SIM_SEED` and
-  `SIM_FAULT_EVERY` through from `.env`: to rename the device, add `SIM_DEVICE_ID` and a
-  matching `MQTT_TOPIC` to the simulator's `environment` in compose.yaml, and the same
-  `MQTT_TOPIC` to the service's.
+- A device that stops reporting keeps its open episodes `ongoing` until it reports again:
+  an episode ends only on a message that no longer breaks the rule, and silence is not one.
+  Its readings in `system-status` do go stale, and `/api/v1/devices` shows how long it has
+  been quiet.
+- Compose passes only the credentials, `SIM_SEED` and `SIM_FAULT_EVERY` through from
+  `.env`. To rename the device, add `SIM_DEVICE_ID` to the simulator's `environment` in
+  compose.yaml and, so that the paths without a device in them follow it, the same value as
+  `DEFAULT_DEVICE_ID` to the service's. The topic follows on its own: the simulator fills the
+  `+` in `MQTT_TOPIC` with its id.
 - The broker accepts anonymous clients and is bound to 127.0.0.1. Anywhere else, give it a
   password file and set credentials on both sides; the code already supports that.
 - `sequence` is advisory and nothing is deduplicated. Counters restart when a device
