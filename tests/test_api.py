@@ -74,7 +74,12 @@ def test_health_is_200_even_with_no_data_and_no_broker():
 
 
 def test_health_counts_messages():
-    assert client_with(message(1)).get("/health").json()["messages_received"] == 1
+    # Fed through a real ingestor, not app_for, which sets the fleet count to
+    # the store's by hand. The default device's own count would say 1 here.
+    _, ingestor, client = fleet_app()
+    ingestor.handle_message("devices/gateway-01/telemetry", payload_from("gateway-01"))
+    ingestor.handle_message("devices/gw-other/telemetry", payload_from("gw-other"))
+    assert client.get("/health").json()["messages_received"] == 2
 
 
 # ------------------------------------------------------------ system-status
@@ -234,9 +239,10 @@ def test_messages_evaluated_excludes_payloads_the_detector_never_saw():
     store = TelemetryStore(history_window=100)
     store.record(message(1))
     store.record_payload_error("undecodable")
-    body = TestClient(app_for(store)).get("/api/v1/anomalies").json()
-    assert body["messages_evaluated"] == 1
-    assert TestClient(app_for(store)).get("/health").json()["messages_received"] == 2
+    client = TestClient(app_for(store))
+    assert client.get("/api/v1/anomalies").json()["messages_evaluated"] == 1
+    # Of the two this device received.
+    assert client.get("/api/v1/statistics").json()["data_quality"]["messages_received"] == 2
 
 
 # ----------------------------------------------------- top-level as_of
@@ -509,6 +515,19 @@ def test_a_well_formed_but_unknown_device_is_404_and_stays_unknown(route):
 def test_a_malformed_device_id_is_422(route, device_id):
     _, _, client = fleet_app()
     assert client.get(route.format(device_id)).status_code == 422
+
+
+@pytest.mark.parametrize("device_id", ["a/b", "a%2Fb"], ids=["slash", "encoded-slash"])
+@pytest.mark.parametrize("route", DEVICE_ROUTES)
+def test_an_id_with_a_slash_matches_no_device_route(route, device_id):
+    # Not a 422 and not "unknown device": the path no longer fits any route,
+    # so the router answers before the id is checked. Device "a" exists, so
+    # "a/b" is not quietly read as "a" either.
+    _, ingestor, client = fleet_app()
+    ingestor.handle_message("devices/a/telemetry", payload_from("a"))
+    response = client.get(route.format(device_id))
+    assert response.status_code == 404
+    assert response.json() == {"detail": "Not Found"}
 
 
 def test_an_unknown_device_with_an_unknown_component_is_422():
