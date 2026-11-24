@@ -375,7 +375,46 @@ def test_a_fleet_counters_snapshot_is_detached():
     assert counters.snapshot()["messages_received"] == 2
 
 
-def test_racing_over_limit_messages_ask_for_exactly_one_warning():
+class CountingLock:
+    """A real lock that counts how often it is taken."""
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self.acquisitions = 0
+
+    def __enter__(self):
+        self.acquisitions += 1
+        return self._lock.__enter__()
+
+    def __exit__(self, *exc_info):
+        return self._lock.__exit__(*exc_info)
+
+
+FLEET_COUNTERS_METHODS = ("record_received", "record_invalid_topic", "record_over_device_limit", "snapshot")
+
+
+def test_the_lock_check_covers_every_public_fleet_counters_method():
+    # A method added later must join the list below, or this fails.
+    public = {name for name in vars(fleet.FleetCounters) if not name.startswith("_")}
+    assert public == set(FLEET_COUNTERS_METHODS)
+
+
+@pytest.mark.parametrize("method", FLEET_COUNTERS_METHODS)
+def test_every_fleet_counters_method_takes_the_lock_exactly_once(method):
+    # This, not the threaded test below, is what fails when a method loses
+    # its `with self._lock`.
+    counters = fleet.FleetCounters()
+    lock = counters._lock = CountingLock()       # type: ignore[assignment]
+    getattr(counters, method)()
+    assert lock.acquisitions == 1
+    assert not lock._lock.locked()
+
+
+def test_racing_counters_smoke_check():
+    # A smoke check only: it cannot detect a missing lock. On a GIL build the
+    # interpreter never switches threads inside `+= 1` or between it and the
+    # `== 1` check, so this passes with the lock removed; only a free-threaded
+    # build could fail it.
     counters = fleet.FleetCounters()
 
     def burst(_):
