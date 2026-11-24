@@ -84,8 +84,8 @@ Base URL `http://localhost:8000`. Interactive docs at `/docs`.
 Messages on `devices/<id>/telemetry` belong to device `<id>`, and each device's state is kept
 apart. A path with `{device_id}` answers `404` `{"detail": "unknown device: <id>"}` for a
 device the service holds no state for, and `422` for an id that cannot be a device id: 1–64
-letters, digits, `.`, `_` or `-`, starting with a letter or digit (an id containing `/`
-cannot match the route and gets a plain `404`). The four `/api/v1` paths
+letters, digits, `.`, `_` or `-`, starting with a letter or digit (an empty id, or one
+containing `/`, cannot match the route and gets a plain `404`). The four `/api/v1` paths
 without a device in them came first and answer for one device, `DEFAULT_DEVICE_ID`
 (`gateway-01`, the simulator), exactly as its `/api/v1/devices/gateway-01/...` routes do;
 `/docs` marks them deprecated. Until that device's first message they answer as an empty
@@ -788,7 +788,7 @@ The service reads these at startup:
 | `API_PORT` | `8000` |
 | `API_HOST` | `0.0.0.0` |
 | `LOG_LEVEL` | `INFO`; `CRITICAL` `ERROR` `WARNING` `INFO` `DEBUG`, plus `WARN`, `FATAL` and `TRACE`; case-insensitive |
-| `HISTORY_WINDOW` | `3600` samples per device; a full window is about 3.7 MB, so 32 full devices take about 120 MB |
+| `HISTORY_WINDOW` | `3600` samples per device; a full window of well-formed telemetry is about 3.7 MB, so 32 full devices take about 120 MB (malformed messages keep more per sample) |
 | `MAX_CLOCK_SKEW_SECONDS` | `60` |
 | `STALE_AFTER_SECONDS` | `30` |
 

@@ -56,8 +56,9 @@ class Component(str, Enum):
 
 # The same rule the ingestor applies to topics, checked before the handler
 # runs: a malformed id is a 422 and never reaches the registry, so a 404 whose
-# detail starts "unknown device:" means "well-formed, but never heard from". An
-# id containing "/" (or %2F) never matches these routes and gets the router's
+# detail starts "unknown device:" means "well-formed, but the service holds no
+# state for it" (never heard from, or refused by MAX_DEVICES). An empty id, or
+# one containing "/" (or %2F), never matches these routes and gets the router's
 # plain 404. max_length repeats the pattern's limit so the 422 says which rule
 # was broken.
 DeviceId = Annotated[
