@@ -1,4 +1,8 @@
-"""HTTP layer: five read-only endpoints over the telemetry pipeline.
+"""HTTP layer: read-only endpoints over the telemetry pipeline, per device.
+
+Each device has its own store, and every response reads each store it needs
+under one acquisition of that store's lock. The endpoints without a device in
+their path predate the fleet; they answer for the default device.
 
 Handlers are sync `def`, not `async def`. They take the store's blocking lock,
 and a blocking acquire inside a coroutine stalls the whole event loop, whereas
@@ -19,7 +23,7 @@ from fastapi import FastAPI, HTTPException, Path
 from fastapi.responses import JSONResponse
 
 from telemetry.anomalies import RULES
-from telemetry.fleet import DEVICE_ID_PATTERN, DeviceRegistry, FleetCounters
+from telemetry.fleet import DEVICE_ID_PATTERN, DeviceRegistry, FleetCounters, is_valid_device_id
 from telemetry.ingest import BrokerConfig, TelemetryIngestor
 from telemetry.statistics import summarise, top_temperatures
 from telemetry.store import TelemetryStore
@@ -135,8 +139,12 @@ def create_app(
 
     app = FastAPI(
         title="Telemetry Service",
-        version="1.0.0",
-        description="Consumes device telemetry over MQTT and serves it over REST.",
+        version="1.1.0",
+        description=(
+            "Consumes telemetry from a fleet of devices over MQTT and serves each "
+            "device's state over REST. The deprecated endpoints without a device in "
+            "their path answer for the default device."
+        ),
         lifespan=lifespan,
     )
 
@@ -272,28 +280,42 @@ def create_app(
         return anomalies_of(known_store(device_id))
 
     # The endpoints from before there were devices, answering for the default one.
-    @app.get("/api/v1/system-status", response_model=None)
+    @app.get("/api/v1/system-status", response_model=None, deprecated=True)
     def system_status() -> dict[str, Any] | JSONResponse:
+        """The default device's system status. Use /api/v1/devices/{device_id}/system-status."""
         return system_status_of(default_store(), default_device_id)
 
-    @app.get("/api/v1/statistics")
+    @app.get("/api/v1/statistics", deprecated=True)
     def statistics() -> dict[str, Any]:
+        """The default device's statistics. Use /api/v1/devices/{device_id}/statistics."""
         return summarise(default_store())
 
-    @app.get("/api/v1/statistics/top-temperatures")
+    @app.get("/api/v1/statistics/top-temperatures", deprecated=True)
     def temperatures(component: Component) -> dict[str, Any]:
+        """The default device's extreme temperatures. Use /api/v1/devices/{device_id}/statistics/top-temperatures."""
         return top_temperatures(default_store(), component.value)
 
-    @app.get("/api/v1/anomalies")
+    @app.get("/api/v1/anomalies", deprecated=True)
     def anomalies() -> dict[str, Any]:
+        """The default device's anomalies. Use /api/v1/devices/{device_id}/anomalies."""
         return anomalies_of(default_store())
 
     return app
 
 
 def build_app() -> FastAPI:
+    # `or`: compose passes an unset variable through as an empty string.
+    default_device_id = os.environ.get("DEFAULT_DEVICE_ID") or DEFAULT_DEVICE_ID
+    if not is_valid_device_id(default_device_id):
+        # No topic could ever name such a device, so the legacy endpoints
+        # would answer 503 for ever without saying why. Fail at startup.
+        raise ValueError(
+            f"DEFAULT_DEVICE_ID={default_device_id!r} is not a device id: 1-64 letters, "
+            "digits, '.', '_' or '-', starting with a letter or digit"
+        )
     registry, counters = DeviceRegistry.from_env(), FleetCounters()
-    return create_app(registry, counters, TelemetryIngestor(registry, counters, BrokerConfig.from_env()))
+    ingestor = TelemetryIngestor(registry, counters, BrokerConfig.from_env())
+    return create_app(registry, counters, ingestor, default_device_id=default_device_id)
 
 
 app = build_app()

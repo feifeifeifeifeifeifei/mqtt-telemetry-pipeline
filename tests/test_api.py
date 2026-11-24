@@ -600,6 +600,66 @@ def test_a_device_s_age_cannot_go_negative_when_a_message_lands_mid_request(monk
     assert age is not None and age >= 0.0, f"negative last_seen_age_seconds: {age}"
 
 
+# ------------------------------------------------------- wiring and the docs
+
+
+@pytest.fixture
+def built(monkeypatch):
+    """Run api.build_app() with create_app replaced, and return what it was given."""
+    import api
+
+    for name in ("MQTT_TOPIC", "MAX_DEVICES", "HISTORY_WINDOW", "DEFAULT_DEVICE_ID"):
+        monkeypatch.delenv(name, raising=False)
+    captured: dict = {}
+    monkeypatch.setattr(api, "create_app", lambda *args, **kwargs: captured.update(args=args, kwargs=kwargs))
+    return lambda: (api.build_app(), captured)[1]
+
+
+def test_build_app_gives_the_app_and_the_ingestor_one_registry_and_one_set_of_counters(built, monkeypatch):
+    monkeypatch.setenv("MAX_DEVICES", "3")
+    monkeypatch.setenv("DEFAULT_DEVICE_ID", "gw-x")
+    captured = built()
+    registry, counters, ingestor = captured["args"]
+    assert captured["kwargs"] == {"default_device_id": "gw-x"}
+    assert registry.max_devices == 3
+    # What the ingestor writes is what the app reads.
+    ingestor.handle_message("devices/gw-x/telemetry", payload_from("gw-x"))
+    assert registry.get("gw-x").messages_received == 1
+    assert counters.snapshot()["messages_received"] == 1
+
+
+@pytest.mark.parametrize("raw", [None, ""], ids=["unset", "empty"])
+def test_the_default_device_is_gateway_01_unless_configured(built, monkeypatch, raw):
+    # compose passes an unset variable through as an empty string.
+    if raw is not None:
+        monkeypatch.setenv("DEFAULT_DEVICE_ID", raw)
+    assert built()["kwargs"] == {"default_device_id": "gateway-01"}
+
+
+@pytest.mark.parametrize("raw", [".hidden", "gw/01", "a" * 65, " gateway-01"],
+                         ids=["leading-dot", "slash", "65-chars", "leading-space"])
+def test_a_malformed_default_device_fails_at_startup_naming_the_variable(built, monkeypatch, raw):
+    # No topic could ever name it, so the legacy endpoints would answer 503
+    # for ever without saying why.
+    monkeypatch.setenv("DEFAULT_DEVICE_ID", raw)
+    with pytest.raises(ValueError, match="DEFAULT_DEVICE_ID"):
+        built()
+
+
+def test_the_openapi_document_describes_the_fleet_api():
+    schema = client_with().get("/openapi.json").json()
+    assert schema["info"]["version"] == "1.1.0"
+    deprecated = {path for path, item in schema["paths"].items() if item["get"].get("deprecated")}
+    assert deprecated == {
+        "/api/v1/system-status", "/api/v1/statistics",
+        "/api/v1/statistics/top-temperatures", "/api/v1/anomalies",
+    }
+    assert "/api/v1/devices" in schema["paths"]
+    parameter = schema["paths"]["/api/v1/devices/{device_id}/statistics"]["get"]["parameters"][0]
+    assert parameter["schema"]["pattern"] == r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"
+    assert parameter["schema"]["maxLength"] == 64
+
+
 # -------------------------------------------------------- container entry
 
 
