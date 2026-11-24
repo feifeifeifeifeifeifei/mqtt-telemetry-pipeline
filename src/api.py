@@ -19,6 +19,7 @@ from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 
 from telemetry.anomalies import RULES
+from telemetry.fleet import DeviceRegistry, FleetCounters
 from telemetry.ingest import BrokerConfig, TelemetryIngestor
 from telemetry.statistics import summarise, top_temperatures
 from telemetry.store import TelemetryStore
@@ -193,8 +194,12 @@ def create_app(store: TelemetryStore, ingestor: TelemetryIngestor | None = None)
 
 
 def build_app() -> FastAPI:
-    store = TelemetryStore()
-    return create_app(store, TelemetryIngestor(store, BrokerConfig.from_env()))
+    registry = DeviceRegistry.from_env()
+    # The endpoints still serve one store: gateway-01's, created up front the
+    # way the single store always was. The first get_or_create never hits the
+    # cap, which is at least 1.
+    store = registry.get_or_create("gateway-01")
+    return create_app(store, TelemetryIngestor(registry, FleetCounters(), BrokerConfig.from_env()))
 
 
 app = build_app()

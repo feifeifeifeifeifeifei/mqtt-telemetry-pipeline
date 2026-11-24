@@ -22,6 +22,7 @@ from simulator.device import CYCLE_TICKS, build_message, encode, reading
 from simulator.faults import CATALOGUE
 from simulator.stream import generate
 from telemetry.anomalies import RULES
+from telemetry.fleet import DEFAULT_TOPIC_FILTER, DeviceRegistry, FleetCounters, device_id_from_topic
 from telemetry.store import TelemetryStore
 from telemetry.validation import PLAUSIBLE_RANGES, PayloadError, validate_payload
 
@@ -66,24 +67,36 @@ def test_each_fault_gets_its_documented_verdict(fault):
     assert outcome(payload, CLEAN_AT) == fault.expect
 
 
-def feed(frames, mono_offset: float = 0.0) -> TelemetryStore:
-    """ingest.handle_payload's six lines, with the frame's planned send time as the receipt time.
+def feed(frames, mono_offset: float = 0.0) -> tuple[DeviceRegistry, FleetCounters]:
+    """ingest.handle_message's lines, with the frame's planned send time as the receipt time.
 
-    A copy on purpose, and the other half of the contract: if handle_payload
-    changes, this has to change with it.
+    A copy on purpose, and the other half of the contract: if handle_message
+    changes, this has to change with it. Every frame goes out on the topic the
+    simulator publishes to and is routed by the service's default filter, so
+    that topic naming the simulator's device is part of the contract too.
     """
-    store = TelemetryStore()
+    registry, counters = DeviceRegistry(), FleetCounters()
     for frame in frames:
+        counters.record_received()
+        received_mono = time.monotonic() - mono_offset
+        device_id = device_id_from_topic(DEFAULT_TOPIC_FILTER, DEFAULT.topic)
+        if device_id is None:
+            counters.record_invalid_topic()
+            continue
+        store = registry.get_or_create(device_id)
+        if store is None:
+            counters.record_over_device_limit()
+            continue
         try:
             message = validate_payload(
-                frame.payload, frame.sent_at, time.monotonic() - mono_offset,
-                previous_uptime=store.last_uptime(),
+                frame.payload, frame.sent_at, received_mono,
+                previous_uptime=store.last_uptime(), topic_device_id=device_id,
             )
         except PayloadError as exc:
-            store.record_payload_error(exc.reason)
+            store.record_payload_error(exc.reason, received_mono=received_mono)
             continue
         store.record(message)
-    return store
+    return registry, counters
 
 
 @pytest.mark.parametrize("seed", range(1, 11))
@@ -96,7 +109,13 @@ def test_every_frame_matches_its_label(seed):
 
 
 def test_one_cycle_through_the_real_store():
-    store = feed(generate(DEFAULT, CYCLE_TICKS, START))
+    registry, counters = feed(generate(DEFAULT, CYCLE_TICKS, START))
+    # Every frame, the broken ones included, reaches the simulator's device.
+    assert counters.snapshot() == {
+        "messages_received": CYCLE_TICKS, "messages_invalid_topic": 0, "messages_over_device_limit": 0,
+    }
+    assert [device_id for device_id, _ in registry.snapshot()] == [DEFAULT_DEVICE_ID]
+    store = registry.get(DEFAULT_DEVICE_ID)
 
     # One closed episode per rule. For cpu_usage this also proves the 3-sample
     # backup burst was dropped: a second episode would show up here.
@@ -119,7 +138,7 @@ def test_one_cycle_through_the_real_store():
         + verdicts["timestamp:receipt-unparseable"],
         "memory_inconsistent": verdicts["flag:memory-inconsistent"],
         "uptime_regressed": 1,      # the firmware reboot at tick 180
-        "device_id_mismatch": 0,    # feed() has no topic, so nothing to compare
+        "device_id_mismatch": 0,    # every payload names the device in its topic
     }
 
     rejected = Counter()
@@ -137,7 +156,7 @@ def test_one_cycle_through_the_real_store():
 
 
 def test_six_rules_are_ongoing_together():
-    store = feed(generate(DEFAULT, 100, START))
+    store = feed(generate(DEFAULT, 100, START))[0].get(DEFAULT_DEVICE_ID)
     assert {episode.metric for episode in store.anomalies() if episode.ongoing} == {
         rule.metric for rule in RULES
     }
@@ -147,7 +166,7 @@ def test_endpoints_light_up():
     empty = TestClient(create_app(TelemetryStore()))
     assert empty.get("/api/v1/system-status").status_code == 503
 
-    client = TestClient(create_app(feed(generate(DEFAULT, CYCLE_TICKS, START))))
+    client = TestClient(create_app(feed(generate(DEFAULT, CYCLE_TICKS, START))[0].get(DEFAULT_DEVICE_ID)))
     status = client.get("/api/v1/system-status")
     assert status.status_code == 200
     body = status.json()
@@ -161,7 +180,7 @@ def test_endpoints_light_up():
     assert len(client.get("/api/v1/anomalies").json()["rules"]) == 6
 
     # Received 31 s ago: just past the 30 s staleness limit.
-    later = TestClient(create_app(feed(generate(DEFAULT, CYCLE_TICKS, START), mono_offset=31)))
+    later = TestClient(create_app(feed(generate(DEFAULT, CYCLE_TICKS, START), mono_offset=31)[0].get(DEFAULT_DEVICE_ID)))
     readings = later.get("/api/v1/system-status").json()["readings"]
     assert len(readings) == 11
     assert all(entry["stale"] for entry in readings.values())

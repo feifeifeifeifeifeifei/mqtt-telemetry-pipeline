@@ -20,7 +20,13 @@ from typing import Any
 
 import paho.mqtt.client as mqtt
 
-from telemetry.store import TelemetryStore
+from telemetry.fleet import (
+    DEFAULT_TOPIC_FILTER,
+    DeviceRegistry,
+    FleetCounters,
+    check_topic_filter,
+    device_id_from_topic,
+)
 from telemetry.validation import PayloadError, validate_payload
 
 LOGGER = logging.getLogger(__name__)
@@ -44,6 +50,7 @@ class BrokerConfig:
     # has none, and a dataclass field without a default cannot follow one with.
     username: str | None
     password: str | None
+    # A subscription filter with exactly one "+" level, which names the device.
     topic: str
 
     @classmethod
@@ -74,18 +81,44 @@ class BrokerConfig:
             password=source.get("MQTT_PASSWORD") or None,
             # Empty means unset here too: subscribing to "" raises inside
             # on_connect, which ends paho's network loop for good.
-            topic=source.get("MQTT_TOPIC") or "devices/gateway-01/telemetry",
+            topic=source.get("MQTT_TOPIC") or DEFAULT_TOPIC_FILTER,
         )
         if config.password and not config.username:
             # Credentials are only sent when a username is set, so this password
             # would be dropped without a word; fail at startup instead.
             raise ValueError("MQTT_PASSWORD is set but MQTT_USERNAME is not")
+        # A filter with no "+" level - the old single-device topic is one -
+        # would still receive messages and route every one of them to no
+        # device. Refuse it here, naming the variable.
+        check_topic_filter(config.topic)
         return config
 
 
+def _topic_of(message: Any) -> str | None:
+    """message.topic, or None when the topic is not UTF-8.
+
+    paho decodes the topic on every read of .topic and raises
+    UnicodeDecodeError for bytes that are not UTF-8. MQTT forbids such a topic,
+    but paho still delivers the message, and it names no device - so it is
+    counted as an invalid topic, not as a handler error.
+    """
+    try:
+        return message.topic
+    except UnicodeDecodeError:
+        return None
+
+
 class TelemetryIngestor:
-    def __init__(self, store: TelemetryStore, config: BrokerConfig) -> None:
-        self._store = store
+    """Records each message in the store of the device its topic names.
+
+    The registry owns the stores and FleetCounters the counts that belong to no
+    device. handler_errors and broker_connected describe the one connection,
+    so they stay here.
+    """
+
+    def __init__(self, registry: DeviceRegistry, counters: FleetCounters, config: BrokerConfig) -> None:
+        self._registry = registry
+        self._counters = counters
         self._config = config
         self.handler_errors = 0
         self.broker_connected = False
@@ -126,29 +159,61 @@ class TelemetryIngestor:
         LOGGER.warning("disconnected from broker: %s", reason_code)
 
     def on_message(self, client: Any, userdata: Any, message: Any) -> None:
+        # Read inside the try, and only once: the log line below uses this
+        # local, because a second read of a topic that raised would raise
+        # again - this time out of the callback.
+        topic: str | None = None
         try:
-            self.handle_payload(message.payload)
+            topic = _topic_of(message)
+            self.handle_message(topic, message.payload)
         except Exception:
             # Deliberately broad, deliberately not `pass`, deliberately not a
             # bare `except:` - a bare one would swallow KeyboardInterrupt too.
             # A non-zero handler_errors means an exception path validation does
             # not cover, i.e. a defect to investigate, not a data statistic.
             self.handler_errors += 1
-            LOGGER.exception("message handler failed: raw=%r", message.payload[:RAW_LOG_LIMIT])
+            LOGGER.exception(
+                "message handler failed: topic=%r raw=%r", topic, message.payload[:RAW_LOG_LIMIT]
+            )
 
     # ----------------------------------------------------------------- inner
 
-    def handle_payload(self, payload: bytes) -> None:
+    def handle_message(self, topic: str | None, payload: bytes) -> None:
+        """Count the message, find its device by topic, then validate and record it there.
+
+        topic is None when paho could not decode it, which names no device.
+        Reading the device's last uptime and then recording into its store are
+        two separate acquisitions. Nothing can write that store in between only
+        because paho's network thread is the one writer; a second writer thread
+        would have to make the pair atomic.
+        """
+        self._counters.record_received()
         received_at = datetime.now(timezone.utc)
         received_mono = time.monotonic()
+        device_id = None if topic is None else device_id_from_topic(self._config.topic, topic)
+        if device_id is None:
+            self._counters.record_invalid_topic()
+            return
+        store = self._registry.get_or_create(device_id)
+        if store is None:
+            if self._counters.record_over_device_limit():
+                # Once, not per message: devices over the cap can send as fast
+                # as any other, and the log would drown. The count keeps going.
+                LOGGER.warning(
+                    "MAX_DEVICES=%d reached: messages from new devices are counted and dropped, "
+                    "starting with %r; devices already known are unaffected",
+                    self._registry.max_devices, device_id,
+                )
+            return
         try:
             message = validate_payload(
-                payload, received_at, received_mono, previous_uptime=self._store.last_uptime()
+                payload, received_at, received_mono,
+                previous_uptime=store.last_uptime(), topic_device_id=device_id,
             )
         except PayloadError as exc:
-            self._store.record_payload_error(exc.reason)
+            store.record_payload_error(exc.reason, received_mono=received_mono)
             return
-        self._store.record(message)
+        store.record(message)
 
     # --------------------------------------------------------------- control
 

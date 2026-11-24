@@ -21,8 +21,8 @@ import pytest
 from fastapi.testclient import TestClient
 
 from api import create_app
+from telemetry.fleet import DeviceRegistry, FleetCounters
 from telemetry.ingest import BrokerConfig, TelemetryIngestor
-from telemetry.store import TelemetryStore
 
 CONFIG = BrokerConfig.from_env()
 # The simulator's identity: the same variable and default it reads itself.
@@ -46,8 +46,11 @@ pytestmark = pytest.mark.skipif(
 
 @pytest.mark.smoke
 def test_real_telemetry_flows_from_the_broker_through_to_the_api():
-    store = TelemetryStore(history_window=100)
-    ingestor = TelemetryIngestor(store, CONFIG)
+    registry = DeviceRegistry(history_window=100)
+    # The simulator's store, created before it publishes; the ingestor routes
+    # its topic here, which is what the waits and assertions below rely on.
+    store = registry.get_or_create(EXPECTED_DEVICE)
+    ingestor = TelemetryIngestor(registry, FleetCounters(), CONFIG)
     client = TestClient(create_app(store, ingestor))
 
     with client:
