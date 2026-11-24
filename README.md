@@ -75,8 +75,8 @@ Base URL `http://localhost:8000`. Interactive docs at `/docs`.
 | `GET` | `/api/v1/statistics` | Per metric: all-time count/min/max/mean/stdev + windowed median/p95, plus window capacity/fill and `data_quality` | — |
 | `GET` | `/api/v1/statistics/top-temperatures?component=cpu\|gpu` | All-time 3 highest and 3 lowest readings with timestamps | `422` on an unknown component |
 | `GET` | `/api/v1/anomalies` | Threshold violations grouped into episodes, plus the active rule set | — |
-| `GET` | `/api/v1/devices` | Every device heard from, with its message count, seconds since its last message and a `stale` flag; plus the device limit and the messages no device took | — |
-| `GET` | `/api/v1/devices/{device_id}/system-status` | As `/api/v1/system-status`, for one device | `404`, `422`; `503` before any telemetry from it |
+| `GET` | `/api/v1/devices` | Every device the service keeps state for (at most `MAX_DEVICES`), with its message count, seconds since its last message and a `stale` flag; plus the device limit and the messages no device took | — |
+| `GET` | `/api/v1/devices/{device_id}/system-status` | As `/api/v1/system-status`, for one device | `404`, `422`; `503` until its first valid message |
 | `GET` | `/api/v1/devices/{device_id}/statistics` | As `/api/v1/statistics`, for one device | `404`, `422` |
 | `GET` | `/api/v1/devices/{device_id}/statistics/top-temperatures?component=cpu\|gpu` | As `/api/v1/statistics/top-temperatures`, for one device | `404`, `422` |
 | `GET` | `/api/v1/devices/{device_id}/anomalies` | As `/api/v1/anomalies`, for one device | `404`, `422` |
@@ -84,7 +84,8 @@ Base URL `http://localhost:8000`. Interactive docs at `/docs`.
 Messages on `devices/<id>/telemetry` belong to device `<id>`, and each device's state is kept
 apart. A path with `{device_id}` answers `404` `{"detail": "unknown device: <id>"}` for a
 device the service holds no state for, and `422` for an id that cannot be a device id: 1–64
-letters, digits, `.`, `_` or `-`, starting with a letter or digit. The four `/api/v1` paths
+letters, digits, `.`, `_` or `-`, starting with a letter or digit (an id containing `/`
+cannot match the route and gets a plain `404`). The four `/api/v1` paths
 without a device in them came first and answer for one device, `DEFAULT_DEVICE_ID`
 (`gateway-01`, the simulator), exactly as its `/api/v1/devices/gateway-01/...` routes do;
 `/docs` marks them deprecated. Until that device's first message they answer as an empty
@@ -787,7 +788,7 @@ The service reads these at startup:
 | `API_PORT` | `8000` |
 | `API_HOST` | `0.0.0.0` |
 | `LOG_LEVEL` | `INFO`; `CRITICAL` `ERROR` `WARNING` `INFO` `DEBUG`, plus `WARN`, `FATAL` and `TRACE`; case-insensitive |
-| `HISTORY_WINDOW` | `3600` samples |
+| `HISTORY_WINDOW` | `3600` samples per device; a full window is about 3.7 MB, so 32 full devices take about 120 MB |
 | `MAX_CLOCK_SKEW_SECONDS` | `60` |
 | `STALE_AFTER_SECONDS` | `30` |
 
@@ -855,9 +856,9 @@ dropped.
   but it would break correctness, which is the reason not to. The store is in-process
   memory, so each worker would hold its own MQTT subscription and its own partial history,
   and they would disagree with one another. This is a property of the design rather than a
-  tuning problem, and it is the right design for one device at 1 Hz: the 754 req/s measured
-  above is getting on for three orders of magnitude above what
-  this service is for. Genuinely scaling it would mean moving the store out of the process,
+  tuning problem, and it is the right design for a few dozen devices at 1 Hz: the 754 req/s
+  measured above is still well over an order of magnitude more than that needs. Genuinely
+  scaling it would mean moving the store out of the process,
   which is the same change as making it survive a restart.
 - Dry-run files are not pure UTF-8: the `bit-flip` line contains 0xFF on purpose. Write
   them with `--out` and read them as bytes.

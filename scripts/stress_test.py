@@ -3,7 +3,7 @@
 
 The interesting question is not "how many requests per second" - nobody is going
 to call this at scale. It is whether hammering the read side starves the MQTT
-writer: every endpoint takes the same non-reentrant lock the ingest thread needs,
+writer: every endpoint takes a non-reentrant lock the ingest thread also needs,
 so a read-heavy load could in principle make the service drop telemetry while
 still answering 200 to everything. That would be invisible from the HTTP side,
 which is exactly the kind of failure this project has been trying to avoid.
@@ -34,7 +34,7 @@ Two consequences worth knowing:
     in-process memory, so each worker would hold its own MQTT subscription and
     its own partial history, and the workers would disagree with one another.
     That is a property of the design, not a tuning problem - and it is the
-    right design for one device at 1 Hz.
+    right design for a few dozen devices at 1 Hz.
 """
 from __future__ import annotations
 

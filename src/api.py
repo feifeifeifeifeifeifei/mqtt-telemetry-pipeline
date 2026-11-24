@@ -55,9 +55,11 @@ class Component(str, Enum):
 
 
 # The same rule the ingestor applies to topics, checked before the handler
-# runs: a malformed id is a 422 and never reaches the registry, so a 404 always
-# means "well-formed, but never heard from". max_length repeats the pattern's
-# limit so the 422 says which rule was broken.
+# runs: a malformed id is a 422 and never reaches the registry, so a 404 whose
+# detail starts "unknown device:" means "well-formed, but never heard from". An
+# id containing "/" (or %2F) never matches these routes and gets the router's
+# plain 404. max_length repeats the pattern's limit so the 422 says which rule
+# was broken.
 DeviceId = Annotated[
     str,
     Path(
@@ -234,8 +236,8 @@ def create_app(
             "uptime_seconds": uptime_seconds(),
         }
 
-    # Registered before the routes below it, so the fixed path is matched as
-    # itself and never read as a device id.
+    # Listed first for readability. No device route can match this path, in
+    # any order: each has a segment after {device_id}.
     @app.get("/api/v1/devices")
     def devices() -> dict[str, Any]:
         """Every device the service holds state for, with the messages that reached no device."""
