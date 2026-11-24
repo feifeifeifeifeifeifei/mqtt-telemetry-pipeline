@@ -220,6 +220,34 @@ def create_app(
             "uptime_seconds": uptime_seconds(),
         }
 
+    # Registered before the routes below it, so the fixed path is matched as
+    # itself and never read as a device id.
+    @app.get("/api/v1/devices")
+    def devices() -> dict[str, Any]:
+        """Every device heard from, with the messages that reached no device."""
+        fleet = counters.snapshot()
+        # One acquisition per store, and the clock read after all of them, for
+        # the reason _readings_payload reads it last: read first, a message
+        # landing in between would make an age negative.
+        activity = [(device_id, store.activity_snapshot()) for device_id, store in registry.snapshot()]
+        now_mono = time.monotonic()
+        rows = []
+        for device_id, (received, last_seen) in activity:
+            age = None if last_seen is None else round(now_mono - last_seen, 3)
+            rows.append({
+                "device_id": device_id,
+                "messages_received": received,
+                "last_seen_age_seconds": age,
+                # A device with no message yet has nothing fresh to offer.
+                "stale": age is None or age > STALE_AFTER_SECONDS,
+            })
+        return {
+            "max_devices": registry.max_devices,
+            "messages_invalid_topic": fleet["messages_invalid_topic"],
+            "messages_over_device_limit": fleet["messages_over_device_limit"],
+            "devices": rows,
+        }
+
     # response_model=None on both system-status routes: the honest return
     # annotation is a union with a Response, which FastAPI would otherwise try
     # to build a response model from.

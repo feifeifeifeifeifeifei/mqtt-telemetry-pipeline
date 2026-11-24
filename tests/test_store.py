@@ -261,6 +261,14 @@ def test_a_payload_error_without_a_receipt_time_is_stamped_now():
     assert before <= store.last_seen_mono() <= after
 
 
+def test_activity_snapshot_pairs_the_count_with_the_last_seen_time():
+    store = TelemetryStore(history_window=5)
+    assert store.activity_snapshot() == (0, None)
+    store.record(message(5))                                  # received_mono 5.0
+    store.record_payload_error("undecodable", received_mono=7.0)
+    assert store.activity_snapshot() == (2, 7.0)
+
+
 def test_the_detector_is_wired_in_and_its_episodes_surface():
     store = TelemetryStore(history_window=50)
     for index in range(1, 8):
@@ -411,6 +419,7 @@ def test_reads_during_writes_neither_raise_nor_lose_updates():
                 store.statistics_snapshot()
                 store.status_snapshot()
                 store.anomaly_snapshot()
+                store.activity_snapshot()
         except BaseException as exc:      # noqa: BLE001
             errors.append(exc)
 

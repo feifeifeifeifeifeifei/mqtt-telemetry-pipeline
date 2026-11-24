@@ -524,6 +524,82 @@ def test_each_legacy_endpoint_answers_as_the_default_device_s_endpoint(monkeypat
     assert client.get(legacy).json() == expected.json()
 
 
+# ------------------------------------------------------------ the device list
+
+
+def test_the_device_list_starts_empty():
+    _, _, client = fleet_app(max_devices=5)
+    assert client.get("/api/v1/devices").json() == {
+        "max_devices": 5, "messages_invalid_topic": 0, "messages_over_device_limit": 0, "devices": [],
+    }
+
+
+def test_the_device_list_shows_every_device_and_the_messages_none_took(monkeypatch):
+    monkeypatch.setattr("api.time.monotonic", lambda: 10_000.0)
+    _, ingestor, client = fleet_app(max_devices=2)
+    ingestor.handle_message("devices/gw-b/telemetry", payload_from("gw-b"))
+    ingestor.handle_message("devices/gw-b/telemetry", payload_from("gw-b"))
+    ingestor.handle_message("devices/gw-a/telemetry", b"{garbage")              # broken, still a device
+    ingestor.handle_message("devices/gw-c/telemetry", payload_from("gw-c"))     # over the cap
+    ingestor.handle_message("devices/gw-c/telemetry", payload_from("gw-c"))     # over the cap
+    ingestor.handle_message("devices/gw-b/status", payload_from("gw-b"))        # names no device
+    assert client.get("/api/v1/devices").json() == {
+        "max_devices": 2,
+        "messages_invalid_topic": 1,
+        "messages_over_device_limit": 2,
+        "devices": [
+            {"device_id": "gw-a", "messages_received": 1, "last_seen_age_seconds": 0.0, "stale": False},
+            {"device_id": "gw-b", "messages_received": 2, "last_seen_age_seconds": 0.0, "stale": False},
+        ],
+    }
+
+
+@pytest.mark.parametrize("age, stale", [(29.0, False), (30.0, False), (30.001, True)])
+def test_a_device_goes_stale_by_the_same_rule_as_a_reading(monkeypatch, age, stale):
+    now = 10_000.0
+    monkeypatch.setattr("api.time.monotonic", lambda: now)
+    registry, _, client = fleet_app()
+    registry.get_or_create("gw-a").record_payload_error("undecodable", received_mono=now - age)
+    row = client.get("/api/v1/devices").json()["devices"][0]
+    assert row["last_seen_age_seconds"] == round(age, 3)
+    assert row["stale"] is stale
+
+
+def test_the_device_list_follows_the_configured_staleness_limit(monkeypatch):
+    monkeypatch.setattr("api.STALE_AFTER_SECONDS", 5.0)
+    monkeypatch.setattr("api.time.monotonic", lambda: 10_000.0)
+    registry, _, client = fleet_app()
+    registry.get_or_create("gw-a").record_payload_error("undecodable", received_mono=10_000.0 - 6.0)
+    assert client.get("/api/v1/devices").json()["devices"][0]["stale"] is True
+
+
+def test_a_device_not_yet_heard_from_has_no_age_and_is_stale():
+    # The ingestor creates a device and records into it in two steps; a list
+    # read in between sees the device with nothing in it yet.
+    registry, _, client = fleet_app()
+    registry.get_or_create("gw-a")
+    assert client.get("/api/v1/devices").json()["devices"] == [
+        {"device_id": "gw-a", "messages_received": 0, "last_seen_age_seconds": None, "stale": True},
+    ]
+
+
+def test_a_device_s_age_cannot_go_negative_when_a_message_lands_mid_request(monkeypatch):
+    """The clock is read after the stores, for the reason system-status reads it last."""
+    class RacingStore(TelemetryStore):
+        def activity_snapshot(self):
+            # Stand in for the writer thread, deterministically: a message
+            # stamped later than any clock read taken before this call.
+            time.sleep(0.05)
+            self.record_payload_error("undecodable")
+            return super().activity_snapshot()
+
+    monkeypatch.setattr("telemetry.fleet.TelemetryStore", RacingStore)
+    registry, _, client = fleet_app()
+    registry.get_or_create("gw-a")
+    age = client.get("/api/v1/devices").json()["devices"][0]["last_seen_age_seconds"]
+    assert age is not None and age >= 0.0, f"negative last_seen_age_seconds: {age}"
+
+
 # -------------------------------------------------------- container entry
 
 
@@ -638,6 +714,7 @@ def test_age_seconds_cannot_go_negative_when_a_write_lands_mid_request():
         "/api/v1/devices/gateway-01/statistics", "/api/v1/devices/gateway-01/system-status",
         "/api/v1/devices/gateway-01/anomalies",
         "/api/v1/devices/gateway-01/statistics/top-temperatures?component=cpu",
+        "/api/v1/devices",
     ],
 )
 def test_each_endpoint_reads_the_store_once(endpoint):

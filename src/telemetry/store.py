@@ -413,3 +413,13 @@ class TelemetryStore:
         """
         with self._lock:
             return self._detector.episodes(), self._evaluated, self._detector.discarded
+
+    def activity_snapshot(self) -> tuple[int, float | None]:
+        """messages_received and last_seen_mono, read at one instant: this
+        store's row in the device list.
+
+        Read separately, a message landing in between could leave a count
+        that does not yet include the message the time came from.
+        """
+        with self._lock:
+            return self._received, self._last_seen_mono
