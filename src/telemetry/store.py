@@ -31,6 +31,7 @@ import math
 import os
 import threading
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from typing import Any
@@ -62,11 +63,13 @@ CROSS_FIELD_KEYS = {
 TIMESTAMP_SUBSTITUTED = "timestamp_substituted"
 
 
-def _configured_history_window() -> int:
+def _configured_history_window(env: Mapping[str, str] | None = None) -> int:
     # max(1, ...): HISTORY_WINDOW=0 would build deque(maxlen=0), silently making
     # median and p95 disappear for ever. A non-numeric value still raises at
-    # construction, which is the right, loud behaviour.
-    return max(1, int(os.environ.get("HISTORY_WINDOW", DEFAULT_HISTORY_WINDOW)))
+    # construction, which is the right, loud behaviour. `env` is injectable for
+    # DeviceRegistry.from_env, which reads every setting from one mapping.
+    source = os.environ if env is None else env
+    return max(1, int(source.get("HISTORY_WINDOW", DEFAULT_HISTORY_WINDOW)))
 
 
 @dataclass

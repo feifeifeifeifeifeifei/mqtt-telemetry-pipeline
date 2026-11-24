@@ -5,9 +5,13 @@ and these tests would only slow every mutant down.
 """
 from __future__ import annotations
 
+import threading
+import time
+
 import pytest
 
 from telemetry import fleet
+from telemetry.store import DEFAULT_HISTORY_WINDOW, TelemetryStore
 
 # ------------------------------------------------------------- device ids
 
@@ -150,3 +154,242 @@ def test_the_same_id_in_another_case_is_another_device():
     upper = fleet.device_id_from_topic("devices/+/telemetry", "devices/GW/telemetry")
     lower = fleet.device_id_from_topic("devices/+/telemetry", "devices/gw/telemetry")
     assert (upper, lower) == ("GW", "gw")
+
+
+# --------------------------------------------------------------- registry
+
+
+def test_the_same_id_always_gets_the_same_store():
+    registry = fleet.DeviceRegistry(max_devices=2, history_window=5)
+    first = registry.get_or_create("gateway-01")
+    assert isinstance(first, TelemetryStore)
+    assert registry.get_or_create("gateway-01") is first
+
+
+def test_each_device_gets_a_store_of_its_own():
+    registry = fleet.DeviceRegistry(max_devices=2, history_window=5)
+    a = registry.get_or_create("a")
+    b = registry.get_or_create("b")
+    assert a is not b
+    a.record_payload_error("undecodable", received_mono=1.0)
+    assert (a.messages_received, b.messages_received) == (1, 0)
+
+
+def test_a_full_registry_refuses_new_devices_but_still_serves_known_ones():
+    registry = fleet.DeviceRegistry(max_devices=2, history_window=5)
+    a = registry.get_or_create("a")
+    b = registry.get_or_create("b")
+    assert registry.get_or_create("c") is None
+    assert registry.get_or_create("a") is a
+    assert registry.get_or_create("b") is b
+    assert registry.get("c") is None
+    assert [device_id for device_id, _ in registry.snapshot()] == ["a", "b"]
+
+
+def test_get_never_creates():
+    registry = fleet.DeviceRegistry(max_devices=1, history_window=5)
+    assert registry.get("a") is None
+    assert registry.snapshot() == []
+    # The read did not take the only slot.
+    store = registry.get_or_create("a")
+    assert store is not None
+    assert registry.get("a") is store
+
+
+def test_snapshot_is_sorted_by_id_and_detached():
+    registry = fleet.DeviceRegistry(max_devices=5, history_window=5)
+    for device_id in ("b", "a", "C"):
+        registry.get_or_create(device_id)
+    snapshot = registry.snapshot()
+    # Plain string order, so upper case sorts before lower case.
+    assert [device_id for device_id, _ in snapshot] == ["C", "a", "b"]
+    assert all(store is registry.get(device_id) for device_id, store in snapshot)
+    registry.get_or_create("d")
+    assert [device_id for device_id, _ in snapshot] == ["C", "a", "b"]
+    snapshot.clear()
+    assert len(registry.snapshot()) == 4
+
+
+def test_max_devices_is_read_only():
+    registry = fleet.DeviceRegistry(max_devices=3, history_window=5)
+    assert registry.max_devices == 3
+    with pytest.raises(AttributeError):
+        registry.max_devices = 4
+
+
+@pytest.mark.parametrize("max_devices", [0, -1])
+def test_a_cap_below_one_is_refused(max_devices):
+    with pytest.raises(ValueError, match="MAX_DEVICES"):
+        fleet.DeviceRegistry(max_devices=max_devices, history_window=5)
+
+
+def test_new_stores_get_the_registry_history_window():
+    registry = fleet.DeviceRegistry(history_window=7)
+    assert registry.max_devices == fleet.DEFAULT_MAX_DEVICES
+    assert registry.get_or_create("a").window_capacity() == 7
+
+
+def test_history_window_is_read_once_when_the_registry_is_built(monkeypatch):
+    # Every device gets the same window size, whatever happens to the
+    # environment after startup.
+    monkeypatch.setenv("HISTORY_WINDOW", "7")
+    registry = fleet.DeviceRegistry()
+    monkeypatch.setenv("HISTORY_WINDOW", "9")
+    assert registry.get_or_create("a").window_capacity() == 7
+
+
+def test_from_env_defaults():
+    registry = fleet.DeviceRegistry.from_env({})
+    assert registry.max_devices == 32
+    assert registry.get_or_create("a").window_capacity() == DEFAULT_HISTORY_WINDOW
+
+
+def test_from_env_reads_both_settings_from_the_mapping_it_is_given(monkeypatch):
+    monkeypatch.setenv("MAX_DEVICES", "9")
+    monkeypatch.setenv("HISTORY_WINDOW", "9")
+    registry = fleet.DeviceRegistry.from_env({"MAX_DEVICES": "5", "HISTORY_WINDOW": "7"})
+    assert registry.max_devices == 5
+    assert registry.get_or_create("a").window_capacity() == 7
+
+
+def test_from_env_reads_the_process_environment_by_default(monkeypatch):
+    monkeypatch.setenv("MAX_DEVICES", "3")
+    monkeypatch.setenv("HISTORY_WINDOW", "11")
+    registry = fleet.DeviceRegistry.from_env()
+    assert registry.max_devices == 3
+    assert registry.get_or_create("a").window_capacity() == 11
+
+
+@pytest.mark.parametrize("raw", ["", "  "], ids=["empty", "blank"])
+def test_an_empty_max_devices_means_the_default(raw):
+    # compose passes an unset variable through as an empty string.
+    assert fleet.DeviceRegistry.from_env({"MAX_DEVICES": raw}).max_devices == 32
+
+
+@pytest.mark.parametrize("raw", ["0", "-1", "abc", "1.5", "32 devices"])
+def test_a_bad_max_devices_fails_at_startup(raw):
+    with pytest.raises(ValueError, match="MAX_DEVICES"):
+        fleet.DeviceRegistry.from_env({"MAX_DEVICES": raw})
+
+
+# ------------------------------------------------------ registry under races
+
+
+def run_together(count, target):
+    """Release `count` threads at once through a barrier; return target(i) per thread."""
+    barrier = threading.Barrier(count)
+    results = [None] * count
+    errors: list[BaseException] = []
+
+    def worker(index):
+        try:
+            barrier.wait(timeout=10)
+            results[index] = target(index)
+        except BaseException as exc:      # noqa: BLE001 - recorded, then asserted on
+            errors.append(exc)
+
+    threads = [threading.Thread(target=worker, args=(index,)) for index in range(count)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=30)
+    assert errors == []
+    return results
+
+
+@pytest.fixture
+def slow_stores(monkeypatch):
+    """Building a store takes 10 ms, so racing threads overlap inside get_or_create.
+
+    Without the delay one thread finishes its check-then-insert before the next
+    is scheduled, and a registry with no lock passes both tests below. With it,
+    removing the lock makes both fail.
+    """
+    real = fleet.TelemetryStore
+
+    def slow(*args, **kwargs):
+        time.sleep(0.01)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(fleet, "TelemetryStore", slow)
+
+
+def test_racing_creators_of_one_device_share_one_store(slow_stores):
+    registry = fleet.DeviceRegistry(max_devices=32, history_window=5)
+    stores = run_together(32, lambda _: registry.get_or_create("gateway-01"))
+    assert stores[0] is not None
+    assert all(store is stores[0] for store in stores)
+    assert registry.snapshot() == [("gateway-01", stores[0])]
+
+
+def test_racing_creators_cannot_push_the_registry_past_its_cap(slow_stores):
+    registry = fleet.DeviceRegistry(max_devices=5, history_window=5)
+    ids = [f"dev-{index:02d}" for index in range(40)]
+    stores = run_together(len(ids), lambda index: registry.get_or_create(ids[index]))
+    created = {ids[index] for index, store in enumerate(stores) if store is not None}
+    assert len(created) == 5
+    assert {device_id for device_id, _ in registry.snapshot()} == created
+    assert all(registry.get(ids[index]) is store
+               for index, store in enumerate(stores) if store is not None)
+
+
+# ---------------------------------------------------------- fleet counters
+
+
+def test_fleet_counters_start_at_zero():
+    assert fleet.FleetCounters().snapshot() == {
+        "messages_received": 0,
+        "messages_invalid_topic": 0,
+        "messages_over_device_limit": 0,
+    }
+
+
+def test_each_fleet_counter_counts_only_its_own_event():
+    counters = fleet.FleetCounters()
+    for _ in range(3):
+        counters.record_received()
+    for _ in range(2):
+        counters.record_invalid_topic()
+    counters.record_over_device_limit()
+    # Different counts on purpose: one each would pass with two branches swapped.
+    assert counters.snapshot() == {
+        "messages_received": 3,
+        "messages_invalid_topic": 2,
+        "messages_over_device_limit": 1,
+    }
+
+
+def test_only_the_first_over_limit_message_asks_for_the_warning():
+    counters = fleet.FleetCounters()
+    assert [counters.record_over_device_limit() for _ in range(3)] == [True, False, False]
+    assert counters.snapshot()["messages_over_device_limit"] == 3
+
+
+def test_a_fleet_counters_snapshot_is_detached():
+    counters = fleet.FleetCounters()
+    counters.record_received()
+    snapshot = counters.snapshot()
+    snapshot["messages_received"] = 99
+    counters.record_received()
+    assert snapshot["messages_received"] == 99
+    assert counters.snapshot()["messages_received"] == 2
+
+
+def test_racing_over_limit_messages_ask_for_exactly_one_warning():
+    counters = fleet.FleetCounters()
+
+    def burst(_):
+        firsts = 0
+        for _ in range(200):
+            counters.record_received()
+            counters.record_invalid_topic()
+            firsts += counters.record_over_device_limit()
+        return firsts
+
+    firsts = run_together(16, burst)
+    assert sum(firsts) == 1
+    assert counters.snapshot() == {
+        "messages_received": 3200,
+        "messages_invalid_topic": 3200,
+        "messages_over_device_limit": 3200,
+    }
