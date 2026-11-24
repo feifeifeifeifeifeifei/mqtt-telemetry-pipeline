@@ -38,12 +38,20 @@ def check_topic_filter(topic_filter: str) -> None:
 
     Exactly one level must be "+", and that level is the device id. "#" would
     let a topic of any depth through with no single level to name the device,
-    and an empty level is never what anybody meant to type. Called at startup,
-    so a bad MQTT_TOPIC stops the service instead of silently routing nothing.
+    and an empty level is never what anybody meant to type. A shared
+    subscription ("$share/<group>/..." or "$queue/...") is refused too: the
+    broker delivers its messages under their own topic, without the prefix, so
+    not one would fit the filter. Called at startup, so a bad MQTT_TOPIC stops
+    the service instead of silently routing nothing.
     """
     levels = topic_filter.split("/")
     if "" in levels:
         raise ValueError(f"MQTT_TOPIC={topic_filter!r} has an empty level")
+    if levels[0] in ("$share", "$queue"):
+        raise ValueError(
+            f"MQTT_TOPIC={topic_filter!r} is a shared subscription; messages arrive under "
+            f"their own topic, without the {levels[0]!r} prefix, so drop the prefix"
+        )
     if "#" in topic_filter:
         raise ValueError(f"MQTT_TOPIC={topic_filter!r} uses '#'; use one '+' level for the device id")
     # ["+"] and nothing else: no "+" level at all, two of them, and a "+" glued

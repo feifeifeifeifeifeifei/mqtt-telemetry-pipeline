@@ -93,16 +93,20 @@ def test_valid_topic_filters(topic_filter):
         "devices/a+/telemetry",
         "devices/+a/telemetry",
         "devices/+/telemetry+",
+        "$share/group/devices/+/telemetry",
+        "$queue/devices/+/telemetry",
     ],
     ids=["empty", "no-plus", "two-plus-levels", "hash-level", "plus-and-hash",
          "hash-inside-a-level", "empty-level-no-plus", "empty-level-with-plus",
          "leading-slash", "trailing-slash", "plus-glued-before", "plus-glued-after",
-         "whole-plus-and-glued-plus"],
+         "whole-plus-and-glued-plus", "shared-subscription", "queue-subscription"],
 )
 def test_invalid_topic_filters_raise_naming_the_variable(topic_filter):
     # Each case trips one rule the others would miss: plus-and-hash has exactly
     # one "+" level, empty-level-with-plus too, and plus-glued-before has a "+"
-    # but no level that is only "+".
+    # but no level that is only "+". The two shared subscriptions have exactly
+    # one "+" level as well, but the broker delivers their messages under the
+    # topic without the prefix, which then has fewer levels than the filter.
     with pytest.raises(ValueError, match="MQTT_TOPIC"):
         fleet.check_topic_filter(topic_filter)
 
