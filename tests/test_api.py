@@ -425,6 +425,105 @@ def test_the_legacy_endpoints_serve_the_configured_default_device():
     assert (cpu["count"], cpu["max"]) == (1, 75.0)
 
 
+# ------------------------------------------------------ one device by its id
+
+DEVICE_ROUTES = (
+    "/api/v1/devices/{}/system-status",
+    "/api/v1/devices/{}/statistics",
+    "/api/v1/devices/{}/statistics/top-temperatures?component=cpu",
+    "/api/v1/devices/{}/anomalies",
+)
+LEGACY_ROUTES = (
+    "/api/v1/system-status",
+    "/api/v1/statistics",
+    "/api/v1/statistics/top-temperatures?component=cpu",
+    "/api/v1/anomalies",
+)
+
+
+@pytest.mark.parametrize("route", DEVICE_ROUTES)
+def test_a_known_device_is_200_on_every_route(route):
+    _, ingestor, client = fleet_app()
+    ingestor.handle_message("devices/gw-a/telemetry", payload_from("gw-a"))
+    assert client.get(route.format("gw-a")).status_code == 200
+
+
+def test_each_device_is_answered_from_its_own_store():
+    _, ingestor, client = fleet_app()
+    ingestor.handle_message("devices/gw-a/telemetry", payload_from("gw-a", cpu_temperature_c=70.0, disk_usage_percent=97.0))
+    ingestor.handle_message("devices/gw-b/telemetry", payload_from("gw-b", cpu_temperature_c=75.0))
+    status = client.get("/api/v1/devices/gw-a/system-status").json()
+    assert status["readings"]["cpu_temperature_c"]["value"] == 70.0
+    cpu = client.get("/api/v1/devices/gw-b/statistics").json()["metrics"]["cpu_temperature_c"]["all_time"]
+    assert (cpu["count"], cpu["max"]) == (1, 75.0)
+    top = client.get("/api/v1/devices/gw-b/statistics/top-temperatures?component=cpu").json()
+    assert [entry["value"] for entry in top["highest"]] == [75.0]
+    hot = client.get("/api/v1/devices/gw-a/anomalies").json()["anomalies"]
+    assert [episode["metric"] for episode in hot] == ["disk_usage_percent"]
+    assert client.get("/api/v1/devices/gw-b/anomalies").json()["anomalies"] == []
+
+
+def test_system_status_names_the_device_in_the_path_not_the_one_the_payload_claims():
+    # The topic decided where the message was stored; the payload's claim is
+    # counted as device_id_mismatch, not echoed as the device's name.
+    _, ingestor, client = fleet_app()
+    ingestor.handle_message("devices/gw-a/telemetry", payload_from("gw-b"))
+    assert client.get("/api/v1/devices/gw-a/system-status").json()["device_id"] == "gw-a"
+
+
+def test_a_known_device_with_no_valid_telemetry_is_503():
+    _, ingestor, client = fleet_app()
+    ingestor.handle_message("devices/gw-a/telemetry", b"{garbage")
+    ingestor.handle_message("devices/gw-a/telemetry", b"[1,2,3]")
+    response = client.get("/api/v1/devices/gw-a/system-status")
+    assert response.status_code == 503
+    body = response.json()
+    assert body["detail"] == "no telemetry received yet"
+    assert body["messages_received"] == 2
+
+
+@pytest.mark.parametrize("route", DEVICE_ROUTES)
+def test_a_well_formed_but_unknown_device_is_404_and_stays_unknown(route):
+    registry, ingestor, client = fleet_app()
+    ingestor.handle_message("devices/gw-a/telemetry", payload_from("gw-a"))
+    response = client.get(route.format("gw-zz"))
+    assert response.status_code == 404
+    assert response.json() == {"detail": "unknown device: gw-zz"}
+    assert registry.get("gw-zz") is None
+
+
+@pytest.mark.parametrize(
+    "device_id",
+    ["-gw", "_gw", "a" * 65, "gw+1", "gatew%C3%A4y", "gw-01%0A"],
+    ids=["leading-dash", "leading-underscore", "65-chars", "plus", "non-ascii", "trailing-newline"],
+)
+@pytest.mark.parametrize("route", DEVICE_ROUTES)
+def test_a_malformed_device_id_is_422(route, device_id):
+    _, _, client = fleet_app()
+    assert client.get(route.format(device_id)).status_code == 422
+
+
+def test_an_unknown_device_with_an_unknown_component_is_422():
+    # Request validation runs before the handler looks the device up.
+    _, _, client = fleet_app()
+    assert client.get("/api/v1/devices/gw-zz/statistics/top-temperatures?component=tpu").status_code == 422
+
+
+@pytest.mark.parametrize("legacy, route", list(zip(LEGACY_ROUTES, DEVICE_ROUTES)))
+def test_each_legacy_endpoint_answers_as_the_default_device_s_endpoint(monkeypatch, legacy, route):
+    # A pinned clock makes every age in the two responses identical. The
+    # second message claims another id, so system-status must name the
+    # default device on the legacy path too.
+    monkeypatch.setattr("api.time.monotonic", lambda: 10_000.0)
+    _, ingestor, client = fleet_app()
+    ingestor.handle_message("devices/gateway-01/telemetry", payload_from("gateway-01", disk_usage_percent=97.0))
+    ingestor.handle_message("devices/gateway-01/telemetry", payload_from("gateway-02"))
+    ingestor.handle_message("devices/gw-a/telemetry", payload_from("gw-a", cpu_temperature_c=70.0))
+    expected = client.get(route.format("gateway-01"))
+    assert expected.status_code == 200
+    assert client.get(legacy).json() == expected.json()
+
+
 # -------------------------------------------------------- container entry
 
 
@@ -533,7 +632,13 @@ def test_age_seconds_cannot_go_negative_when_a_write_lands_mid_request():
 
 @pytest.mark.parametrize(
     "endpoint",
-    ["/api/v1/statistics", "/api/v1/system-status", "/api/v1/anomalies"],
+    [
+        "/api/v1/statistics", "/api/v1/system-status", "/api/v1/anomalies",
+        "/api/v1/statistics/top-temperatures?component=cpu",
+        "/api/v1/devices/gateway-01/statistics", "/api/v1/devices/gateway-01/system-status",
+        "/api/v1/devices/gateway-01/anomalies",
+        "/api/v1/devices/gateway-01/statistics/top-temperatures?component=cpu",
+    ],
 )
 def test_each_endpoint_reads_the_store_once(endpoint):
     """One response, one acquisition - otherwise its fields describe different moments."""
@@ -561,7 +666,8 @@ def test_each_endpoint_reads_the_store_once(endpoint):
     assert store._lock.acquisitions == 1   # type: ignore[attr-defined]
 
 
-def test_the_503_branch_also_reads_the_store_once():
+@pytest.mark.parametrize("endpoint", ["/api/v1/system-status", "/api/v1/devices/gateway-01/system-status"])
+def test_the_503_branch_also_reads_the_store_once(endpoint):
     """The empty-store path is the one that was still taking two.
 
     record_payload_error bumps messages_received without setting _latest, so a
@@ -584,7 +690,7 @@ def test_the_503_branch_also_reads_the_store_once():
     store.record_payload_error("undecodable")
     client = TestClient(app_for(store))
     store._lock = CountingLock()           # type: ignore[assignment]
-    response = client.get("/api/v1/system-status")
+    response = client.get(endpoint)
     assert response.status_code == 503
     assert response.json()["messages_received"] == 1
     assert store._lock.acquisitions == 1   # type: ignore[attr-defined]

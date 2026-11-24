@@ -13,13 +13,13 @@ import time
 from contextlib import asynccontextmanager
 from datetime import datetime
 from enum import Enum
-from typing import Any
+from typing import Annotated, Any
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException, Path
 from fastapi.responses import JSONResponse
 
 from telemetry.anomalies import RULES
-from telemetry.fleet import DeviceRegistry, FleetCounters
+from telemetry.fleet import DEVICE_ID_PATTERN, DeviceRegistry, FleetCounters
 from telemetry.ingest import BrokerConfig, TelemetryIngestor
 from telemetry.statistics import summarise, top_temperatures
 from telemetry.store import TelemetryStore
@@ -43,6 +43,20 @@ class Component(str, Enum):
 
     cpu = "cpu"
     gpu = "gpu"
+
+
+# The same rule the ingestor applies to topics, checked before the handler
+# runs: a malformed id is a 422 and never reaches the registry, so a 404 always
+# means "well-formed, but never heard from". max_length repeats the pattern's
+# limit so the 422 says which rule was broken.
+DeviceId = Annotated[
+    str,
+    Path(
+        pattern=DEVICE_ID_PATTERN,
+        max_length=64,
+        description="The device's id: the level of its MQTT topic that names the device.",
+    ),
+]
 
 
 def _readings_payload(
@@ -140,28 +154,17 @@ def create_app(
         store = registry.get(default_device_id)
         return store if store is not None else TelemetryStore()
 
-    @app.get("/health")
-    def health() -> dict[str, Any]:
-        # Always 200 if the process can answer. Broker state is data, not a
-        # status code: "the process is alive" and "it has a source" are
-        # different questions, and conflating them makes a momentary blip look
-        # like a dead service. messages_received is the whole fleet's,
-        # including messages no device took.
-        return {
-            "status": "ok",
-            "broker_connected": broker_connected(),
-            "messages_received": counters.snapshot()["messages_received"],
-            "uptime_seconds": uptime_seconds(),
-        }
+    def known_store(device_id: str) -> TelemetryStore:
+        store = registry.get(device_id)
+        if store is None:
+            raise HTTPException(status_code=404, detail=f"unknown device: {device_id}")
+        return store
 
-    # response_model=None: the honest return annotation is a union with a
-    # Response, which FastAPI would otherwise try to build a response model from.
-    @app.get("/api/v1/system-status", response_model=None)
-    def system_status() -> dict[str, Any] | JSONResponse:
+    def system_status_of(store: TelemetryStore, device_id: str) -> dict[str, Any] | JSONResponse:
         # One acquisition for both halves: latest() then latest_per_field()
         # could straddle a write, so device_id and the readings disagreed about
         # which message they came from.
-        latest, per_field, received = default_store().status_snapshot()
+        latest, per_field, received = store.status_snapshot()
         if latest is None:
             # 503, not 200-with-nulls: a monitoring system reads 200 as success,
             # and a caller could not separate "the device has no data" from "the
@@ -179,11 +182,71 @@ def create_app(
         readings, newest = _readings_payload(per_field, STALE_AFTER_SECONDS)
         ages = [r["age_seconds"] for r in readings.values() if r["age_seconds"] is not None]
         return {
-            "device_id": latest.device_id,
+            # The device the request named, which is the topic the data came
+            # in on. A payload that claims another id is counted under
+            # cross_field.device_id_mismatch, not echoed here.
+            "device_id": device_id,
             "as_of": isoformat_z(newest) if newest is not None else None,
             "readings": readings,
             "oldest_reading_age_seconds": max(ages) if ages else None,
         }
+
+    def anomalies_of(store: TelemetryStore) -> dict[str, Any]:
+        # One acquisition: an episode list read at one moment beside an
+        # evaluated count read at another makes an empty list look like
+        # stronger evidence of calm than it is.
+        episodes, evaluated, discarded = store.anomaly_snapshot()
+        return {
+            "anomalies": [episode.as_dict() for episode in episodes],
+            # Shipped so the endpoint is self-describing: a caller sees all six
+            # watched metrics with thresholds and reasoning, not only the ones
+            # firing, and an empty list stops being ambiguous.
+            "rules": [rule.as_dict() for rule in RULES],
+            "messages_evaluated": evaluated,
+            "episodes_discarded": discarded,
+        }
+
+    @app.get("/health")
+    def health() -> dict[str, Any]:
+        # Always 200 if the process can answer. Broker state is data, not a
+        # status code: "the process is alive" and "it has a source" are
+        # different questions, and conflating them makes a momentary blip look
+        # like a dead service. messages_received is the whole fleet's,
+        # including messages no device took.
+        return {
+            "status": "ok",
+            "broker_connected": broker_connected(),
+            "messages_received": counters.snapshot()["messages_received"],
+            "uptime_seconds": uptime_seconds(),
+        }
+
+    # response_model=None on both system-status routes: the honest return
+    # annotation is a union with a Response, which FastAPI would otherwise try
+    # to build a response model from.
+    @app.get("/api/v1/devices/{device_id}/system-status", response_model=None)
+    def device_system_status(device_id: DeviceId) -> dict[str, Any] | JSONResponse:
+        """The newest valid value of every field for one device, with its age."""
+        return system_status_of(known_store(device_id), device_id)
+
+    @app.get("/api/v1/devices/{device_id}/statistics")
+    def device_statistics(device_id: DeviceId) -> dict[str, Any]:
+        """All-time and recent-window statistics for one device, with data quality."""
+        return summarise(known_store(device_id))
+
+    @app.get("/api/v1/devices/{device_id}/statistics/top-temperatures")
+    def device_temperatures(device_id: DeviceId, component: Component) -> dict[str, Any]:
+        """One device's highest and lowest temperatures for a component."""
+        return top_temperatures(known_store(device_id), component.value)
+
+    @app.get("/api/v1/devices/{device_id}/anomalies")
+    def device_anomalies(device_id: DeviceId) -> dict[str, Any]:
+        """One device's anomaly episodes, with the rules that detect them."""
+        return anomalies_of(known_store(device_id))
+
+    # The endpoints from before there were devices, answering for the default one.
+    @app.get("/api/v1/system-status", response_model=None)
+    def system_status() -> dict[str, Any] | JSONResponse:
+        return system_status_of(default_store(), default_device_id)
 
     @app.get("/api/v1/statistics")
     def statistics() -> dict[str, Any]:
@@ -195,19 +258,7 @@ def create_app(
 
     @app.get("/api/v1/anomalies")
     def anomalies() -> dict[str, Any]:
-        # One acquisition: an episode list read at one moment beside an
-        # evaluated count read at another makes an empty list look like
-        # stronger evidence of calm than it is.
-        episodes, evaluated, discarded = default_store().anomaly_snapshot()
-        return {
-            "anomalies": [episode.as_dict() for episode in episodes],
-            # Shipped so the endpoint is self-describing: a caller sees all six
-            # watched metrics with thresholds and reasoning, not only the ones
-            # firing, and an empty list stops being ambiguous.
-            "rules": [rule.as_dict() for rule in RULES],
-            "messages_evaluated": evaluated,
-            "episodes_discarded": discarded,
-        }
+        return anomalies_of(default_store())
 
     return app
 
