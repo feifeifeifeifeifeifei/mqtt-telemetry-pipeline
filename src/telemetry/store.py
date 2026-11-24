@@ -30,6 +30,7 @@ import collections
 import math
 import os
 import threading
+import time
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from typing import Any
@@ -208,6 +209,7 @@ class TelemetryStore:
         self._evaluated = 0
         self._undecodable = 0
         self._wrong_shape = 0
+        self._last_seen_mono: float | None = None
 
     # ------------------------------------------------------------------ writes
 
@@ -215,6 +217,7 @@ class TelemetryStore:
         with self._lock:
             self._received += 1
             self._evaluated += 1
+            self._last_seen_mono = message.received_mono
             self._history.append(message)
             self._latest = message
 
@@ -259,9 +262,14 @@ class TelemetryStore:
 
             self._detector.observe(message)
 
-    def record_payload_error(self, reason: str) -> None:
+    def record_payload_error(self, reason: str, *, received_mono: float | None = None) -> None:
+        # received_mono: when the payload arrived, so it matches the clock
+        # record() reads from the message. None means now, which keeps callers
+        # that have no receipt time of their own working.
+        seen = time.monotonic() if received_mono is None else received_mono
         with self._lock:
             self._received += 1
+            self._last_seen_mono = seen
             if reason == REASON_UNDECODABLE:
                 self._undecodable += 1
             elif reason == REASON_WRONG_SHAPE:
@@ -320,6 +328,14 @@ class TelemetryStore:
         with self._lock:
             entry = self._latest_per_field.get("uptime_seconds")
             return entry[0] if entry is not None else None
+
+    def last_seen_mono(self) -> float | None:
+        """Monotonic time of the newest message of any kind, or None before the first.
+
+        Any kind: a payload that never decoded still proves the device is talking.
+        """
+        with self._lock:
+            return self._last_seen_mono
 
     @property
     def messages_received(self) -> int:

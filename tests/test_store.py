@@ -223,6 +223,30 @@ def test_last_uptime_returns_the_newest_accepted_value():
     assert store.last_uptime() == 3.0
 
 
+def test_last_seen_mono_is_none_before_anything_arrives():
+    assert TelemetryStore(history_window=5).last_seen_mono() is None
+
+
+def test_last_seen_mono_follows_both_write_paths():
+    # A device that only ever sends broken payloads has still been seen, so
+    # record_payload_error has to move the clock as well as record().
+    store = TelemetryStore(history_window=5)
+    store.record(message(5))                                  # received_mono 5.0
+    assert store.last_seen_mono() == 5.0
+    store.record_payload_error("undecodable", received_mono=7.0)
+    assert store.last_seen_mono() == 7.0
+    store.record(message(9))
+    assert store.last_seen_mono() == 9.0
+
+
+def test_a_payload_error_without_a_receipt_time_is_stamped_now():
+    store = TelemetryStore(history_window=5)
+    before = time.monotonic()
+    store.record_payload_error("wrong-shape")
+    after = time.monotonic()
+    assert before <= store.last_seen_mono() <= after
+
+
 def test_the_detector_is_wired_in_and_its_episodes_surface():
     store = TelemetryStore(history_window=50)
     for index in range(1, 8):
@@ -366,6 +390,7 @@ def test_reads_during_writes_neither_raise_nor_lose_updates():
                 store.latest()
                 store.extremes("cpu_temperature_c")
                 store.last_uptime()
+                store.last_seen_mono()
                 store.messages_evaluated()
                 store.episodes_discarded()
                 _ = store.messages_received
