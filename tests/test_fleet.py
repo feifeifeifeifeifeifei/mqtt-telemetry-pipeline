@@ -233,6 +233,13 @@ def test_new_stores_get_the_registry_history_window():
     assert registry.get_or_create("a").window_capacity() == 7
 
 
+def test_history_window_is_read_only():
+    registry = fleet.DeviceRegistry(max_devices=3, history_window=7)
+    assert registry.history_window == 7
+    with pytest.raises(AttributeError):
+        registry.history_window = 8
+
+
 def test_history_window_is_read_once_when_the_registry_is_built(monkeypatch):
     # Every device gets the same window size, whatever happens to the
     # environment after startup.
@@ -240,6 +247,7 @@ def test_history_window_is_read_once_when_the_registry_is_built(monkeypatch):
     registry = fleet.DeviceRegistry()
     monkeypatch.setenv("HISTORY_WINDOW", "9")
     assert registry.get_or_create("a").window_capacity() == 7
+    assert registry.history_window == 7
 
 
 def test_from_env_defaults():

@@ -118,6 +118,10 @@ class DeviceRegistry:
     def max_devices(self) -> int:
         return self._max_devices
 
+    @property
+    def history_window(self) -> int:
+        return self._history_window
+
     def get_or_create(self, device_id: str) -> TelemetryStore | None:
         """The device's store, created on first sight; None once the cap is reached.
 

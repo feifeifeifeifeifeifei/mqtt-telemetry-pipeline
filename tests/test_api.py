@@ -407,7 +407,7 @@ def test_before_the_default_device_appears_the_legacy_endpoints_answer_as_before
     assert status.json()["messages_received"] == 0
     # The same answers an empty single-device service gave, whatever the other
     # device has sent.
-    empty = TestClient(app_for(TelemetryStore()))
+    empty = TestClient(app_for(TelemetryStore(history_window=registry.history_window)))
     for path in ("/api/v1/statistics", "/api/v1/statistics/top-temperatures?component=cpu", "/api/v1/anomalies"):
         response = client.get(path)
         assert response.status_code == 200
@@ -415,6 +415,14 @@ def test_before_the_default_device_appears_the_legacy_endpoints_answer_as_before
     assert client.get("/api/v1/anomalies").json()["anomalies"] == []
     # Reading never creates a device.
     assert [device_id for device_id, _ in registry.snapshot()] == ["gw-other"]
+
+
+def test_before_the_default_device_appears_its_window_is_the_registry_s(monkeypatch):
+    # The registry read HISTORY_WINDOW once, at startup. A stand-in store that
+    # read it again would find whatever the environment says now.
+    monkeypatch.setenv("HISTORY_WINDOW", "7")
+    client = TestClient(create_app(DeviceRegistry(history_window=100), FleetCounters()))
+    assert client.get("/api/v1/statistics").json()["window_samples"] == 100
 
 
 def test_the_legacy_endpoints_serve_the_configured_default_device():

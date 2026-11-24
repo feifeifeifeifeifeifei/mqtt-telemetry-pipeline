@@ -158,9 +158,10 @@ def create_app(
         # Until the default device sends its first message, the endpoints
         # without a device in their path answer exactly as the single-device
         # service did before its first message: from an empty store, built for
-        # this one response and never registered.
+        # this one response and never registered. Its window is the registry's,
+        # read once at startup, like every real device's.
         store = registry.get(default_device_id)
-        return store if store is not None else TelemetryStore()
+        return store if store is not None else TelemetryStore(history_window=registry.history_window)
 
     def known_store(device_id: str) -> TelemetryStore:
         store = registry.get(device_id)
