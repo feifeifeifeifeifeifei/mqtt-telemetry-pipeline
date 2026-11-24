@@ -709,7 +709,7 @@ has seen — so its test quality is worth checking rather than assuming. The sco
 deliberately that one module: it is pure, with no I/O, clock or threads, so the run takes
 about a second per full suite pass.
 
-CI currently reports 143 mutants, 143 killed. Mutation testing has earned its keep more
+CI currently reports 156 mutants, 156 killed. Mutation testing has earned its keep more
 than once. Its first run in CI found two survivors that turn `astimezone(timezone.utc)`
 into `astimezone(None)`: on a runner whose clock is UTC, local time is UTC, so no test
 could tell them apart. Two tests now switch the process to UTC+05:30 and check that
