@@ -37,6 +37,11 @@ STALE_AFTER_SECONDS: float = float(os.environ.get("STALE_AFTER_SECONDS", "30"))
 # device this service had before it had many.
 DEFAULT_DEVICE_ID = "gateway-01"
 
+# Answers the OpenAPI document lists beside the 200 and 422 FastAPI adds on its
+# own, so /docs shows every status a route can return.
+UNKNOWN_DEVICE: dict[int | str, dict[str, Any]] = {404: {"description": "Unknown device"}}
+NO_TELEMETRY_YET: dict[int | str, dict[str, Any]] = {503: {"description": "No valid telemetry received yet"}}
+
 
 # Declaring the parameter as an Enum is what makes FastAPI return a 422 naming
 # the allowed values, with no validation code of our own. Kept as a comment
@@ -143,7 +148,7 @@ def create_app(
         description=(
             "Consumes telemetry from a fleet of devices over MQTT and serves each "
             "device's state over REST. The deprecated endpoints without a device in "
-            "their path answer for the default device."
+            f"their path answer for the default device, {default_device_id}."
         ),
         lifespan=lifespan,
     )
@@ -233,7 +238,7 @@ def create_app(
     # itself and never read as a device id.
     @app.get("/api/v1/devices")
     def devices() -> dict[str, Any]:
-        """Every device heard from, with the messages that reached no device."""
+        """Every device the service holds state for, with the messages that reached no device."""
         fleet = counters.snapshot()
         # One acquisition per store, and the clock read after all of them, for
         # the reason _readings_payload reads it last: read first, a message
@@ -260,45 +265,71 @@ def create_app(
     # response_model=None on both system-status routes: the honest return
     # annotation is a union with a Response, which FastAPI would otherwise try
     # to build a response model from.
-    @app.get("/api/v1/devices/{device_id}/system-status", response_model=None)
+    @app.get(
+        "/api/v1/devices/{device_id}/system-status",
+        response_model=None,
+        responses={**UNKNOWN_DEVICE, **NO_TELEMETRY_YET},
+    )
     def device_system_status(device_id: DeviceId) -> dict[str, Any] | JSONResponse:
         """The newest valid value of every field for one device, with its age."""
         return system_status_of(known_store(device_id), device_id)
 
-    @app.get("/api/v1/devices/{device_id}/statistics")
+    @app.get("/api/v1/devices/{device_id}/statistics", responses=UNKNOWN_DEVICE)
     def device_statistics(device_id: DeviceId) -> dict[str, Any]:
         """All-time and recent-window statistics for one device, with data quality."""
         return summarise(known_store(device_id))
 
-    @app.get("/api/v1/devices/{device_id}/statistics/top-temperatures")
+    @app.get("/api/v1/devices/{device_id}/statistics/top-temperatures", responses=UNKNOWN_DEVICE)
     def device_temperatures(device_id: DeviceId, component: Component) -> dict[str, Any]:
         """One device's highest and lowest temperatures for a component."""
         return top_temperatures(known_store(device_id), component.value)
 
-    @app.get("/api/v1/devices/{device_id}/anomalies")
+    @app.get("/api/v1/devices/{device_id}/anomalies", responses=UNKNOWN_DEVICE)
     def device_anomalies(device_id: DeviceId) -> dict[str, Any]:
         """One device's anomaly episodes, with the rules that detect them."""
         return anomalies_of(known_store(device_id))
 
-    # The endpoints from before there were devices, answering for the default one.
-    @app.get("/api/v1/system-status", response_model=None, deprecated=True)
+    # The endpoints from before there were devices, answering for the default
+    # one. Each description names it, so /docs says which device they wait for
+    # when it never appears (a DEFAULT_DEVICE_ID that no publisher uses).
+    # Passed as description= rather than written as docstrings, which cannot
+    # hold the configured id.
+    @app.get(
+        "/api/v1/system-status",
+        response_model=None,
+        deprecated=True,
+        responses=NO_TELEMETRY_YET,
+        description=f"The system status of the default device, {default_device_id}. "
+        "Use /api/v1/devices/{device_id}/system-status.",
+    )
     def system_status() -> dict[str, Any] | JSONResponse:
-        """The default device's system status. Use /api/v1/devices/{device_id}/system-status."""
         return system_status_of(default_store(), default_device_id)
 
-    @app.get("/api/v1/statistics", deprecated=True)
+    @app.get(
+        "/api/v1/statistics",
+        deprecated=True,
+        description=f"The statistics of the default device, {default_device_id}. "
+        "Use /api/v1/devices/{device_id}/statistics.",
+    )
     def statistics() -> dict[str, Any]:
-        """The default device's statistics. Use /api/v1/devices/{device_id}/statistics."""
         return summarise(default_store())
 
-    @app.get("/api/v1/statistics/top-temperatures", deprecated=True)
+    @app.get(
+        "/api/v1/statistics/top-temperatures",
+        deprecated=True,
+        description=f"The extreme temperatures of the default device, {default_device_id}. "
+        "Use /api/v1/devices/{device_id}/statistics/top-temperatures.",
+    )
     def temperatures(component: Component) -> dict[str, Any]:
-        """The default device's extreme temperatures. Use /api/v1/devices/{device_id}/statistics/top-temperatures."""
         return top_temperatures(default_store(), component.value)
 
-    @app.get("/api/v1/anomalies", deprecated=True)
+    @app.get(
+        "/api/v1/anomalies",
+        deprecated=True,
+        description=f"The anomalies of the default device, {default_device_id}. "
+        "Use /api/v1/devices/{device_id}/anomalies.",
+    )
     def anomalies() -> dict[str, Any]:
-        """The default device's anomalies. Use /api/v1/devices/{device_id}/anomalies."""
         return anomalies_of(default_store())
 
     return app

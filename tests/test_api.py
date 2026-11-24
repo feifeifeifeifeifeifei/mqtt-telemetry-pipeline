@@ -668,6 +668,39 @@ def test_the_openapi_document_describes_the_fleet_api():
     assert parameter["schema"]["maxLength"] == 64
 
 
+def test_the_openapi_document_lists_every_status_each_data_route_answers():
+    # /docs is a test console: a 404 or 503 it does not list is a surprise there.
+    paths = client_with().get("/openapi.json").json()["paths"]
+    assert {path: set(item["get"]["responses"]) for path, item in paths.items()} == {
+        "/health": {"200"},
+        "/api/v1/devices": {"200"},
+        "/api/v1/devices/{device_id}/system-status": {"200", "404", "422", "503"},
+        "/api/v1/devices/{device_id}/statistics": {"200", "404", "422"},
+        "/api/v1/devices/{device_id}/statistics/top-temperatures": {"200", "404", "422"},
+        "/api/v1/devices/{device_id}/anomalies": {"200", "404", "422"},
+        "/api/v1/system-status": {"200", "503"},
+        "/api/v1/statistics": {"200"},
+        "/api/v1/statistics/top-temperatures": {"200", "422"},
+        "/api/v1/anomalies": {"200"},
+    }
+    # Devices refused by MAX_DEVICES were heard from too, and are not listed.
+    assert paths["/api/v1/devices"]["get"]["description"] == (
+        "Every device the service holds state for, with the messages that reached no device."
+    )
+
+
+def test_the_openapi_document_names_the_default_device():
+    # A DEFAULT_DEVICE_ID no publisher uses (ids are case-sensitive) answers
+    # 503 for ever on the paths without a device in them; /docs says which
+    # device those paths are waiting for.
+    _, _, client = fleet_app(default_device_id="Gw-B")
+    schema = client.get("/openapi.json").json()
+    assert "Gw-B" in schema["info"]["description"]
+    for path in ("/api/v1/system-status", "/api/v1/statistics",
+                 "/api/v1/statistics/top-temperatures", "/api/v1/anomalies"):
+        assert "Gw-B" in schema["paths"][path]["get"]["description"], path
+
+
 # -------------------------------------------------------- container entry
 
 
