@@ -111,6 +111,23 @@ def test_invalid_topic_filters_raise_naming_the_variable(topic_filter):
         fleet.check_topic_filter(topic_filter)
 
 
+@pytest.mark.parametrize(
+    "topic_filter, prefix",
+    [
+        ("$share/group/devices/+/telemetry", "'$share/group/'"),
+        ("$queue/devices/+/telemetry", "'$queue/'"),
+        ("$share", "'$share/'"),
+    ],
+    ids=["shared-subscription", "queue-subscription", "bare-share"],
+)
+def test_a_shared_subscription_error_names_the_whole_prefix_to_drop(topic_filter, prefix):
+    # Dropping only "$share/" would leave "group/devices/+/telemetry", which
+    # passes every other rule and then fits no topic the broker delivers.
+    with pytest.raises(ValueError) as raised:
+        fleet.check_topic_filter(topic_filter)
+    assert f"without the {prefix} prefix" in str(raised.value)
+
+
 # ---------------------------------------------------------- topic -> device
 
 

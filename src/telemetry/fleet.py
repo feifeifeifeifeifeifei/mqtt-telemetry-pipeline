@@ -48,9 +48,11 @@ def check_topic_filter(topic_filter: str) -> None:
     if "" in levels:
         raise ValueError(f"MQTT_TOPIC={topic_filter!r} has an empty level")
     if levels[0] in ("$share", "$queue"):
+        # The whole prefix the broker strips: "$share/<group>/" or "$queue/".
+        prefix = "/".join(levels[: 2 if levels[0] == "$share" else 1]) + "/"
         raise ValueError(
             f"MQTT_TOPIC={topic_filter!r} is a shared subscription; messages arrive under "
-            f"their own topic, without the {levels[0]!r} prefix, so drop the prefix"
+            f"their own topic, without the {prefix!r} prefix, so drop the prefix"
         )
     if "#" in topic_filter:
         raise ValueError(f"MQTT_TOPIC={topic_filter!r} uses '#'; use one '+' level for the device id")
