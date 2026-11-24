@@ -517,12 +517,12 @@ def test_a_malformed_device_id_is_422(route, device_id):
     assert client.get(route.format(device_id)).status_code == 422
 
 
-@pytest.mark.parametrize("device_id", ["a/b", "a%2Fb"], ids=["slash", "encoded-slash"])
+@pytest.mark.parametrize("device_id", ["a/b", "a%2Fb", ""], ids=["slash", "encoded-slash", "empty"])
 @pytest.mark.parametrize("route", DEVICE_ROUTES)
-def test_an_id_with_a_slash_matches_no_device_route(route, device_id):
+def test_an_empty_id_or_one_with_a_slash_matches_no_device_route(route, device_id):
     # Not a 422 and not "unknown device": the path no longer fits any route,
     # so the router answers before the id is checked. Device "a" exists, so
-    # "a/b" is not quietly read as "a" either.
+    # "a/b" is not quietly read as "a" either, and "" gives an empty segment.
     _, ingestor, client = fleet_app()
     ingestor.handle_message("devices/a/telemetry", payload_from("a"))
     response = client.get(route.format(device_id))
@@ -709,9 +709,9 @@ def test_the_openapi_document_lists_every_status_each_data_route_answers():
 
 
 def test_the_openapi_document_names_the_default_device():
-    # A DEFAULT_DEVICE_ID no publisher uses (ids are case-sensitive) answers
-    # 503 for ever on the paths without a device in them; /docs says which
-    # device those paths are waiting for.
+    # A DEFAULT_DEVICE_ID no publisher uses (ids are case-sensitive) leaves the
+    # paths without a device in them waiting for ever: 503 from system-status,
+    # empty results from the rest. /docs says which device they are waiting for.
     _, _, client = fleet_app(default_device_id="Gw-B")
     schema = client.get("/openapi.json").json()
     assert "Gw-B" in schema["info"]["description"]
