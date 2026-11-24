@@ -26,7 +26,7 @@ from telemetry.ingest import BrokerConfig, TelemetryIngestor
 
 CONFIG = BrokerConfig.from_env()
 # The simulator's identity: the same variable and default it reads itself.
-EXPECTED_DEVICE = os.environ.get("SIM_DEVICE_ID", "gateway-01")
+EXPECTED_DEVICE = os.environ.get("SIM_DEVICE_ID") or "gateway-01"
 # Generous on purpose: the loop below returns as soon as its condition holds.
 WAIT_SECONDS = 30
 

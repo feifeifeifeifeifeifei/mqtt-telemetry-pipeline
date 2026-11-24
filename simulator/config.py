@@ -7,11 +7,19 @@ containers; the simulator's own knobs carry a SIM_ prefix.
 from __future__ import annotations
 
 import os
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 
-DEFAULT_TOPIC = "devices/gateway-01/telemetry"
+# The service's subscription filter. Its "+" level stands for the device id,
+# so this device publishes to devices/gateway-01/telemetry.
+DEFAULT_TOPIC = "devices/+/telemetry"
 DEFAULT_DEVICE_ID = "gateway-01"
+# A copy of the service's device id rule: the simulator's image has no src/ to
+# import it from. A test checks that the two are the same string.
+DEVICE_ID_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"
+
+_DEVICE_ID = re.compile(DEVICE_ID_PATTERN)
 
 
 def _number(name: str, raw: str, default: str, parse=int):
@@ -59,6 +67,8 @@ class Config:
         # `env` is injectable so tests can pass a dict instead of monkeypatching
         # the process environment - the same shape as the service's BrokerConfig.
         source = os.environ if env is None else env
+        # `or`, as for every variable here: compose hands an unset one over as "".
+        device_id = source.get("SIM_DEVICE_ID") or DEFAULT_DEVICE_ID
         config = cls(
             # Same rules as the service's BrokerConfig: compose turns an unset
             # variable into an empty string, so "" has to mean "unset" rather
@@ -70,8 +80,10 @@ class Config:
             username=source.get("MQTT_USERNAME") or None,
             password=source.get("MQTT_PASSWORD") or None,
             # Empty means the default too: paho refuses to publish to "".
-            topic=source.get("MQTT_TOPIC") or DEFAULT_TOPIC,
-            device_id=source.get("SIM_DEVICE_ID", DEFAULT_DEVICE_ID),
+            # MQTT_TOPIC is the service's filter, so the "+" becomes this
+            # device's id; a topic without one is published to as it is.
+            topic=(source.get("MQTT_TOPIC") or DEFAULT_TOPIC).replace("+", device_id),
+            device_id=device_id,
             rate_hz=_number("SIM_RATE_HZ", source.get("SIM_RATE_HZ", ""), "1", float),
             seed=_number("SIM_SEED", source.get("SIM_SEED", ""), "7"),
             fault_every=_number("SIM_FAULT_EVERY", source.get("SIM_FAULT_EVERY", ""), "10"),
@@ -80,8 +92,14 @@ class Config:
             # The publisher logs in only when a username is set, so a lone
             # password would be dropped without a word.
             raise ValueError("MQTT_PASSWORD is set but MQTT_USERNAME is not")
-        if not config.device_id:
-            raise ValueError("SIM_DEVICE_ID must not be empty")
+        if _DEVICE_ID.fullmatch(config.device_id) is None:
+            # The service reads the device id from the topic and drops a
+            # message whose id breaks this rule, so the frames would go nowhere.
+            # fullmatch, not match: `$` also matches before a trailing "\n".
+            raise ValueError(
+                f"SIM_DEVICE_ID={config.device_id!r} is not a device id: 1-64 letters, "
+                "digits, '.', '_' or '-', starting with a letter or digit"
+            )
         if not 0.1 <= config.rate_hz <= 10:
             # 0.1 Hz is one message every 10 s, still inside the service's 30 s
             # staleness limit. The rate only fast-forwards the story, and at

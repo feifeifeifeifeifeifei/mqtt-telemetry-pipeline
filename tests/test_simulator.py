@@ -44,9 +44,10 @@ def test_config_defaults_match_the_documented_values():
         topic="devices/gateway-01/telemetry", device_id="gateway-01",
         rate_hz=1.0, seed=7, fault_every=10,
     )
-    # Literals, not the constants: the service hard-codes the same topic, so a
-    # silent change here would leave the two sides talking past each other.
-    assert (DEFAULT_TOPIC, DEFAULT_DEVICE_ID) == ("devices/gateway-01/telemetry", "gateway-01")
+    # Literals, not the constants: the service's default filter is the same
+    # string, so a silent change here would leave the two sides talking past
+    # each other. Config.topic above is that filter with its "+" filled in.
+    assert (DEFAULT_TOPIC, DEFAULT_DEVICE_ID) == ("devices/+/telemetry", "gateway-01")
 
 
 def test_config_reads_every_documented_variable():
@@ -78,9 +79,41 @@ def test_a_password_without_a_username_is_refused():
         Config.from_env({"MQTT_PASSWORD": "p"})
 
 
-def test_an_empty_device_id_is_refused():
+def test_an_empty_device_id_means_the_default():
+    # As for every other variable here, and for the service's DEFAULT_DEVICE_ID:
+    # compose hands an unset variable over as "".
+    config = Config.from_env({"SIM_DEVICE_ID": ""})
+    assert (config.device_id, config.topic) == ("gateway-01", "devices/gateway-01/telemetry")
+
+
+@pytest.mark.parametrize(
+    "env, topic",
+    [
+        ({"SIM_DEVICE_ID": "gw-07"}, "devices/gw-07/telemetry"),
+        ({"SIM_DEVICE_ID": "gw-07", "MQTT_TOPIC": "fleet/site-a/+/telemetry"}, "fleet/site-a/gw-07/telemetry"),
+        ({"SIM_DEVICE_ID": "gw-07", "MQTT_TOPIC": "devices/gateway-01/telemetry"}, "devices/gateway-01/telemetry"),
+    ],
+    ids=["default-filter", "configured-filter", "no-plus"],
+)
+def test_the_device_id_fills_the_plus_in_the_topic(env, topic):
+    # MQTT_TOPIC is the service's subscription filter. This device publishes
+    # to it with the "+" replaced by its own id; a topic with no "+" is
+    # published to as it is.
+    assert Config.from_env(env).topic == topic
+
+
+@pytest.mark.parametrize(
+    "device_id",
+    ["  ", "-gw", ".hidden", "a/b", "a+b", "a#b", "a" * 65, "gw 01", "gateway-01\n", "gatewäy"],
+    ids=["blank", "leading-dash", "leading-dot", "slash", "plus", "hash", "65-chars", "space",
+         "trailing-newline", "non-ascii"],
+)
+def test_a_device_id_the_service_could_not_route_is_refused(device_id):
+    # The service reads the device from the topic and counts a message whose
+    # device level breaks its id rule as an invalid topic, so this device
+    # would publish into the void. "a/b" would even add a topic level.
     with pytest.raises(ValueError, match="SIM_DEVICE_ID"):
-        Config.from_env({"SIM_DEVICE_ID": ""})
+        Config.from_env({"SIM_DEVICE_ID": device_id})
 
 
 @pytest.mark.parametrize("rate", ["0.05", "11", "nan"])
@@ -672,3 +705,34 @@ def test_both_programs_reject_the_same_ports_with_the_same_message(port):
     with pytest.raises(ValueError) as simulator_error:
         Config.from_env({"MQTT_PORT": port, "SIM_DEVICE_ID": "gateway-01"})
     assert str(simulator_error.value) == str(service_error.value)
+
+
+def test_the_simulator_s_device_id_rule_is_the_service_s():
+    # A copy, not an import: the simulator's image has no src/.
+    from simulator.config import DEVICE_ID_PATTERN
+    from telemetry.fleet import DEVICE_ID_PATTERN as SERVICE_PATTERN
+
+    assert DEVICE_ID_PATTERN == SERVICE_PATTERN
+
+
+@pytest.mark.parametrize(
+    "env",
+    [
+        {},
+        {"MQTT_TOPIC": ""},
+        {"SIM_DEVICE_ID": ""},
+        {"SIM_DEVICE_ID": "gw-07"},
+        {"SIM_DEVICE_ID": "Gateway.v2_" + "a" * 53},
+        {"MQTT_TOPIC": "fleet/site-a/+/telemetry", "SIM_DEVICE_ID": "gw-07"},
+    ],
+    ids=["defaults", "empty-topic", "empty-device-id", "other-device", "64-chars", "other-filter"],
+)
+def test_the_service_routes_what_the_simulator_publishes_to_the_simulator_s_device(env):
+    """One MQTT_TOPIC serves both programs: the service subscribes with it as a
+    filter, the simulator publishes to it with its "+" filled in, and the
+    service reads the simulator's own id back out of that topic."""
+    from telemetry.fleet import device_id_from_topic
+    from telemetry.ingest import BrokerConfig
+
+    service, simulator = BrokerConfig.from_env(env), Config.from_env(env)
+    assert device_id_from_topic(service.topic, simulator.topic) == simulator.device_id
