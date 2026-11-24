@@ -55,6 +55,10 @@ FLAG_DEVICE_ID_MISMATCH = "device-id-mismatch"
 
 MEMORY_TOLERANCE_POINTS = 1.5
 MAX_RAW_REPR = 60
+# The device-id rule's own limit, repeated rather than imported: telemetry.fleet
+# depends on this module, not the other way round. A payload's device_id is
+# compared with the topic's in full, then kept at most this long.
+MAX_DEVICE_ID_LENGTH = 64
 
 # Read once at import, not per message: a malformed value then fails loudly at
 # startup instead of raising inside the pipeline, where ingest's except-clause
@@ -241,6 +245,11 @@ def validate_payload(
     device_id = decoded.get("device_id")
     if not isinstance(device_id, str):
         device_id = None
+    flags = _consistency_flags(readings, previous_uptime, device_id, topic_device_id)
+    if device_id is not None:
+        # Compared whole above, kept bounded here: every message in a device's
+        # window holds its device_id, and nothing caps a payload's size.
+        device_id = device_id[:MAX_DEVICE_ID_LENGTH]
 
     return ValidatedMessage(
         readings=readings,
@@ -250,5 +259,5 @@ def validate_payload(
         received_mono=received_mono,
         sequence=sequence,
         device_id=device_id,
-        consistency_flags=_consistency_flags(readings, previous_uptime, device_id, topic_device_id),
+        consistency_flags=flags,
     )

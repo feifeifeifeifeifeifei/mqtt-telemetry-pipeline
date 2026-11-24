@@ -313,6 +313,17 @@ def test_a_payload_id_that_differs_from_the_topic_is_flagged_and_kept(payload_id
     assert set(result.readings) == set(PLAUSIBLE_RANGES)
 
 
+def test_a_long_payload_id_is_compared_whole_and_kept_truncated():
+    # Every message in a device's window keeps its device_id, and nothing caps
+    # a payload's size, so an id kept whole would let one device's window hold
+    # gigabytes. The comparison still sees all of it: this id matches the topic
+    # for its first 64 characters and is a mismatch only after them.
+    topic_id = "g" * 64
+    result = validate(payload(device_id=topic_id + "x" * 10_000), topic_device_id=topic_id)
+    assert result.consistency_flags == (FLAG_DEVICE_ID_MISMATCH,)
+    assert result.device_id == "g" * 64
+
+
 def test_a_payload_id_that_matches_the_topic_is_not_flagged():
     assert validate(payload(), topic_device_id="gateway-01").consistency_flags == ()
 
