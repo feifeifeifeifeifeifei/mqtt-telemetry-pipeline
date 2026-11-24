@@ -29,6 +29,9 @@ from telemetry.validation import PLAUSIBLE_RANGES, SOURCE_PAYLOAD, isoformat_z
 # value then fails loudly at startup instead of turning every single request
 # into a 500.
 STALE_AFTER_SECONDS: float = float(os.environ.get("STALE_AFTER_SECONDS", "30"))
+# The device the endpoints without a device in their path serve: the one
+# device this service had before it had many.
+DEFAULT_DEVICE_ID = "gateway-01"
 
 
 # Declaring the parameter as an Enum is what makes FastAPI return a 422 naming
@@ -90,12 +93,19 @@ def _readings_payload(
     return readings, newest
 
 
-def create_app(store: TelemetryStore, ingestor: TelemetryIngestor | None = None) -> FastAPI:
+def create_app(
+    registry: DeviceRegistry,
+    counters: FleetCounters,
+    ingestor: TelemetryIngestor | None = None,
+    *,
+    default_device_id: str = DEFAULT_DEVICE_ID,
+) -> FastAPI:
     """Single owner of the wiring.
 
-    Tests pass a pre-populated store and no ingestor, so nothing touches a
+    Tests pass a pre-populated registry and no ingestor, so nothing touches a
     broker. The lifespan starts an ingestor only when one was supplied; it never
-    constructs its own.
+    constructs its own. Handlers only ever look devices up - registry.get, never
+    get_or_create - so a request cannot create a device; only a message can.
     """
     started_mono = time.monotonic()
 
@@ -122,16 +132,25 @@ def create_app(store: TelemetryStore, ingestor: TelemetryIngestor | None = None)
     def broker_connected() -> bool:
         return ingestor.broker_connected if ingestor is not None else False
 
+    def default_store() -> TelemetryStore:
+        # Until the default device sends its first message, the endpoints
+        # without a device in their path answer exactly as the single-device
+        # service did before its first message: from an empty store, built for
+        # this one response and never registered.
+        store = registry.get(default_device_id)
+        return store if store is not None else TelemetryStore()
+
     @app.get("/health")
     def health() -> dict[str, Any]:
         # Always 200 if the process can answer. Broker state is data, not a
         # status code: "the process is alive" and "it has a source" are
         # different questions, and conflating them makes a momentary blip look
-        # like a dead service.
+        # like a dead service. messages_received is the whole fleet's,
+        # including messages no device took.
         return {
             "status": "ok",
             "broker_connected": broker_connected(),
-            "messages_received": store.messages_received,
+            "messages_received": counters.snapshot()["messages_received"],
             "uptime_seconds": uptime_seconds(),
         }
 
@@ -142,7 +161,7 @@ def create_app(store: TelemetryStore, ingestor: TelemetryIngestor | None = None)
         # One acquisition for both halves: latest() then latest_per_field()
         # could straddle a write, so device_id and the readings disagreed about
         # which message they came from.
-        latest, per_field, received = store.status_snapshot()
+        latest, per_field, received = default_store().status_snapshot()
         if latest is None:
             # 503, not 200-with-nulls: a monitoring system reads 200 as success,
             # and a caller could not separate "the device has no data" from "the
@@ -168,18 +187,18 @@ def create_app(store: TelemetryStore, ingestor: TelemetryIngestor | None = None)
 
     @app.get("/api/v1/statistics")
     def statistics() -> dict[str, Any]:
-        return summarise(store)
+        return summarise(default_store())
 
     @app.get("/api/v1/statistics/top-temperatures")
     def temperatures(component: Component) -> dict[str, Any]:
-        return top_temperatures(store, component.value)
+        return top_temperatures(default_store(), component.value)
 
     @app.get("/api/v1/anomalies")
     def anomalies() -> dict[str, Any]:
         # One acquisition: an episode list read at one moment beside an
         # evaluated count read at another makes an empty list look like
         # stronger evidence of calm than it is.
-        episodes, evaluated, discarded = store.anomaly_snapshot()
+        episodes, evaluated, discarded = default_store().anomaly_snapshot()
         return {
             "anomalies": [episode.as_dict() for episode in episodes],
             # Shipped so the endpoint is self-describing: a caller sees all six
@@ -194,12 +213,8 @@ def create_app(store: TelemetryStore, ingestor: TelemetryIngestor | None = None)
 
 
 def build_app() -> FastAPI:
-    registry = DeviceRegistry.from_env()
-    # The endpoints still serve one store: gateway-01's, created up front the
-    # way the single store always was. The first get_or_create never hits the
-    # cap, which is at least 1.
-    store = registry.get_or_create("gateway-01")
-    return create_app(store, TelemetryIngestor(registry, FleetCounters(), BrokerConfig.from_env()))
+    registry, counters = DeviceRegistry.from_env(), FleetCounters()
+    return create_app(registry, counters, TelemetryIngestor(registry, counters, BrokerConfig.from_env()))
 
 
 app = build_app()

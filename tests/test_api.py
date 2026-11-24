@@ -6,9 +6,12 @@ import time
 from datetime import datetime, timedelta, timezone
 
 import pytest
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from api import create_app
+from telemetry.fleet import DeviceRegistry, FleetCounters
+from telemetry.ingest import BrokerConfig, TelemetryIngestor
 from telemetry.store import TelemetryStore
 from telemetry.validation import PLAUSIBLE_RANGES, validate_payload
 
@@ -33,11 +36,29 @@ def message(second: int, *, age: float = 0.0, **overrides):
     return validate_payload(json.dumps(body).encode(), moment, time.monotonic() - age)
 
 
+DEFAULT_DEVICE = "gateway-01"
+
+
+def app_for(store: TelemetryStore, ingestor: StubIngestor | None = None) -> FastAPI:
+    """create_app over a fleet of one: `store` is the default device's store.
+
+    Most tests here build their store by hand, so it is registered as it is
+    rather than fed through an ingestor, and the fleet count is brought level
+    with it: every message that store received, the fleet received.
+    """
+    registry = DeviceRegistry(history_window=store.window_capacity())
+    registry._stores[DEFAULT_DEVICE] = store        # the one registry internal a test touches
+    counters = FleetCounters()
+    for _ in range(store.messages_received):
+        counters.record_received()
+    return create_app(registry, counters, ingestor)
+
+
 def client_with(*messages, **store_kwargs) -> TestClient:
     store = TelemetryStore(history_window=store_kwargs.pop("history_window", 100), **store_kwargs)
     for msg in messages:
         store.record(msg)
-    return TestClient(create_app(store))
+    return TestClient(app_for(store))
 
 
 # ------------------------------------------------------------------- health
@@ -116,7 +137,7 @@ def test_oldest_reading_age_is_the_maximum_among_fields_that_have_one():
     store = TelemetryStore(history_window=100)
     store.record(message(1, age=50.0))
     store.record(message(2, age=0.0, cpu_temperature_c="97.64"))
-    body = TestClient(create_app(store)).get("/api/v1/system-status").json()
+    body = TestClient(app_for(store)).get("/api/v1/system-status").json()
     assert body["oldest_reading_age_seconds"] > 49
 
 
@@ -132,7 +153,7 @@ def test_statistics_reports_all_time_and_window_separately():
     store = TelemetryStore(history_window=3)
     for index, value in enumerate([10.0, 20.0, 30.0, 40.0, 50.0], start=1):
         store.record(message(index, cpu_temperature_c=value))
-    body = TestClient(create_app(store)).get("/api/v1/statistics").json()
+    body = TestClient(app_for(store)).get("/api/v1/statistics").json()
     cpu = body["metrics"]["cpu_temperature_c"]
     assert cpu["all_time"]["count"] == 5
     assert cpu["window"]["count"] == 3
@@ -201,7 +222,7 @@ def test_a_sustained_violation_is_reported_as_one_episode():
     store = TelemetryStore(history_window=100)
     for index in range(1, 6):
         store.record(message(index, disk_usage_percent=97.0))
-    body = TestClient(create_app(store)).get("/api/v1/anomalies").json()
+    body = TestClient(app_for(store)).get("/api/v1/anomalies").json()
     disk = [a for a in body["anomalies"] if a["metric"] == "disk_usage_percent"]
     assert len(disk) == 1
     assert disk[0]["occurrences"] == 5
@@ -213,9 +234,9 @@ def test_messages_evaluated_excludes_payloads_the_detector_never_saw():
     store = TelemetryStore(history_window=100)
     store.record(message(1))
     store.record_payload_error("undecodable")
-    body = TestClient(create_app(store)).get("/api/v1/anomalies").json()
+    body = TestClient(app_for(store)).get("/api/v1/anomalies").json()
     assert body["messages_evaluated"] == 1
-    assert TestClient(create_app(store)).get("/health").json()["messages_received"] == 2
+    assert TestClient(app_for(store)).get("/health").json()["messages_received"] == 2
 
 
 # ----------------------------------------------------- top-level as_of
@@ -244,7 +265,7 @@ def test_as_of_is_the_newest_component_not_the_lexicographically_largest():
     store.record(whole)
     store.record(fractional)
     assert "cpu_temperature_c" not in fractional.readings   # the pin, not a side effect
-    body = TestClient(create_app(store)).get("/api/v1/system-status").json()
+    body = TestClient(app_for(store)).get("/api/v1/system-status").json()
     # cpu_temperature_c still reads 12:00:00; every other field reads 12:00:00.500.
     assert body["readings"]["cpu_temperature_c"]["as_of"] == "2026-10-19T12:00:00Z"
     # "Z" (0x5A) sorts after "." (0x2E), so maxing the formatted strings picks
@@ -279,7 +300,7 @@ def test_staleness_boundary_is_exact_and_strict(monkeypatch, age, stale):
         datetime(2026, 10, 19, 12, 0, 1, tzinfo=timezone.utc),
         now - age,
     ))
-    reading = TestClient(create_app(store)).get("/api/v1/system-status").json()["readings"]["cpu_temperature_c"]
+    reading = TestClient(app_for(store)).get("/api/v1/system-status").json()["readings"]["cpu_temperature_c"]
     assert reading["stale"] is stale
 
 
@@ -316,7 +337,7 @@ class StubIngestor:
 
 def test_broker_state_is_reported_from_the_ingestor():
     store = TelemetryStore(history_window=10)
-    client = TestClient(create_app(store, StubIngestor(connected=True)))
+    client = TestClient(app_for(store, StubIngestor(connected=True)))
     assert client.get("/health").json()["broker_connected"] is True
     assert client.get("/api/v1/system-status").json()["broker_connected"] is True
 
@@ -325,27 +346,83 @@ def test_the_503_distinguishes_just_started_from_never_received_anything():
     store = TelemetryStore(history_window=10)
     for _ in range(7):
         store.record_payload_error("undecodable")
-    body = TestClient(create_app(store)).get("/api/v1/system-status").json()
+    body = TestClient(app_for(store)).get("/api/v1/system-status").json()
     assert body["messages_received"] == 7      # arriving but unusable, not silent
     assert body["broker_connected"] is False
 
 
 def test_the_lifespan_starts_and_stops_the_ingestor():
     stub = StubIngestor()
-    with TestClient(create_app(TelemetryStore(history_window=10), stub)):
+    with TestClient(app_for(TelemetryStore(history_window=10), stub)):
         assert stub.started is True
     assert stub.stopped is True
 
 
 def test_the_lifespan_constructs_nothing_when_no_ingestor_is_supplied():
     # The first draft had create_app and the lifespan both claiming ownership.
-    with TestClient(create_app(TelemetryStore(history_window=10))) as client:
+    with TestClient(app_for(TelemetryStore(history_window=10))) as client:
         assert client.get("/health").json()["broker_connected"] is False
 
 
 def test_health_returns_exactly_the_documented_keys():
     body = client_with().get("/health").json()
     assert set(body) == {"status", "broker_connected", "messages_received", "uptime_seconds"}
+
+
+# ------------------------------------------- a fleet fed through a real ingestor
+
+
+def payload_from(device_id: str, **fields) -> bytes:
+    return json.dumps(dict(BASE, device_id=device_id, **fields)).encode()
+
+
+def fleet_app(max_devices: int = 4, **app_kwargs) -> tuple[DeviceRegistry, TelemetryIngestor, TestClient]:
+    """A real ingestor and the app, sharing one registry and one set of counters.
+
+    The ingestor is not handed to create_app, so no lifespan can start it;
+    tests call handle_message on it directly.
+    """
+    registry, counters = DeviceRegistry(max_devices=max_devices, history_window=100), FleetCounters()
+    ingestor = TelemetryIngestor(registry, counters, BrokerConfig.from_env({}))
+    return registry, ingestor, TestClient(create_app(registry, counters, **app_kwargs))
+
+
+def test_health_counts_every_message_the_fleet_received():
+    # The ones no device took as well: they did arrive, and a count without
+    # them would hide a publisher on the wrong topic.
+    registry, ingestor, client = fleet_app(max_devices=1)
+    ingestor.handle_message("devices/gw-a/telemetry", payload_from("gw-a"))
+    ingestor.handle_message("devices/gw-b/telemetry", payload_from("gw-b"))     # over the cap
+    ingestor.handle_message("devices/gw-a/status", payload_from("gw-a"))        # names no device
+    assert client.get("/health").json()["messages_received"] == 3
+    assert registry.get("gw-a").messages_received == 1
+
+
+def test_before_the_default_device_appears_the_legacy_endpoints_answer_as_before():
+    registry, ingestor, client = fleet_app()
+    ingestor.handle_message("devices/gw-other/telemetry", payload_from("gw-other", disk_usage_percent=97.0))
+    status = client.get("/api/v1/system-status")
+    assert status.status_code == 503
+    assert status.json()["detail"] == "no telemetry received yet"
+    assert status.json()["messages_received"] == 0
+    # The same answers an empty single-device service gave, whatever the other
+    # device has sent.
+    empty = TestClient(app_for(TelemetryStore()))
+    for path in ("/api/v1/statistics", "/api/v1/statistics/top-temperatures?component=cpu", "/api/v1/anomalies"):
+        response = client.get(path)
+        assert response.status_code == 200
+        assert response.json() == empty.get(path).json()
+    assert client.get("/api/v1/anomalies").json()["anomalies"] == []
+    # Reading never creates a device.
+    assert [device_id for device_id, _ in registry.snapshot()] == ["gw-other"]
+
+
+def test_the_legacy_endpoints_serve_the_configured_default_device():
+    _, ingestor, client = fleet_app(default_device_id="gw-b")
+    ingestor.handle_message("devices/gw-a/telemetry", payload_from("gw-a", cpu_temperature_c=70.0))
+    ingestor.handle_message("devices/gw-b/telemetry", payload_from("gw-b", cpu_temperature_c=75.0))
+    cpu = client.get("/api/v1/statistics").json()["metrics"]["cpu_temperature_c"]["all_time"]
+    assert (cpu["count"], cpu["max"]) == (1, 75.0)
 
 
 # -------------------------------------------------------- container entry
@@ -448,7 +525,7 @@ def test_age_seconds_cannot_go_negative_when_a_write_lands_mid_request():
 
     store = RacingStore(history_window=50)
     store.record(_message())
-    body = TestClient(create_app(store)).get("/api/v1/system-status").json()
+    body = TestClient(app_for(store)).get("/api/v1/system-status").json()
     ages = [r["age_seconds"] for r in body["readings"].values() if r["age_seconds"] is not None]
     assert ages, "expected at least one field to report an age"
     assert min(ages) >= 0.0, f"negative age_seconds: {min(ages)}"
@@ -478,7 +555,7 @@ def test_each_endpoint_reads_the_store_once(endpoint):
             json.dumps(dict(BASE, timestamp="2026-10-19T12:00:00Z")).encode(),
             datetime(2026, 10, 19, 12, 0, 0, tzinfo=timezone.utc), time.monotonic(),
         ))
-    client = TestClient(create_app(store))
+    client = TestClient(app_for(store))
     store._lock = CountingLock()           # type: ignore[assignment]
     assert client.get(endpoint).status_code == 200
     assert store._lock.acquisitions == 1   # type: ignore[attr-defined]
@@ -505,7 +582,7 @@ def test_the_503_branch_also_reads_the_store_once():
 
     store = TelemetryStore(history_window=50)
     store.record_payload_error("undecodable")
-    client = TestClient(create_app(store))
+    client = TestClient(app_for(store))
     store._lock = CountingLock()           # type: ignore[assignment]
     response = client.get("/api/v1/system-status")
     assert response.status_code == 503

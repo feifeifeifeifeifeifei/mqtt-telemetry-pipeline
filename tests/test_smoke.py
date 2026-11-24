@@ -46,12 +46,12 @@ pytestmark = pytest.mark.skipif(
 
 @pytest.mark.smoke
 def test_real_telemetry_flows_from_the_broker_through_to_the_api():
-    registry = DeviceRegistry(history_window=100)
+    registry, counters = DeviceRegistry(history_window=100), FleetCounters()
     # The simulator's store, created before it publishes; the ingestor routes
     # its topic here, which is what the waits and assertions below rely on.
     store = registry.get_or_create(EXPECTED_DEVICE)
-    ingestor = TelemetryIngestor(registry, FleetCounters(), CONFIG)
-    client = TestClient(create_app(store, ingestor))
+    ingestor = TelemetryIngestor(registry, counters, CONFIG)
+    client = TestClient(create_app(registry, counters, ingestor, default_device_id=EXPECTED_DEVICE))
 
     with client:
         assert client.get("/api/v1/system-status").status_code in (200, 503)

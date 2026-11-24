@@ -23,7 +23,6 @@ from simulator.faults import CATALOGUE
 from simulator.stream import generate
 from telemetry.anomalies import RULES
 from telemetry.fleet import DEFAULT_TOPIC_FILTER, DeviceRegistry, FleetCounters, device_id_from_topic
-from telemetry.store import TelemetryStore
 from telemetry.validation import PLAUSIBLE_RANGES, PayloadError, validate_payload
 
 START = datetime(2026, 10, 19, 8, 0, tzinfo=timezone.utc)
@@ -163,10 +162,10 @@ def test_six_rules_are_ongoing_together():
 
 
 def test_endpoints_light_up():
-    empty = TestClient(create_app(TelemetryStore()))
+    empty = TestClient(create_app(DeviceRegistry(), FleetCounters()))
     assert empty.get("/api/v1/system-status").status_code == 503
 
-    client = TestClient(create_app(feed(generate(DEFAULT, CYCLE_TICKS, START))[0].get(DEFAULT_DEVICE_ID)))
+    client = TestClient(create_app(*feed(generate(DEFAULT, CYCLE_TICKS, START))))
     status = client.get("/api/v1/system-status")
     assert status.status_code == 200
     body = status.json()
@@ -180,7 +179,7 @@ def test_endpoints_light_up():
     assert len(client.get("/api/v1/anomalies").json()["rules"]) == 6
 
     # Received 31 s ago: just past the 30 s staleness limit.
-    later = TestClient(create_app(feed(generate(DEFAULT, CYCLE_TICKS, START), mono_offset=31)[0].get(DEFAULT_DEVICE_ID)))
+    later = TestClient(create_app(*feed(generate(DEFAULT, CYCLE_TICKS, START), mono_offset=31)))
     readings = later.get("/api/v1/system-status").json()["readings"]
     assert len(readings) == 11
     assert all(entry["stale"] for entry in readings.values())
