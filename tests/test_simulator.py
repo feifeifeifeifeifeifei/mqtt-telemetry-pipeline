@@ -815,3 +815,15 @@ def test_the_simulator_trims_the_topic_too(raw):
     # subscribed to "devices/+/telemetry", and nothing would ever match.
     config = Config.from_env({"MQTT_TOPIC": raw, "SIM_DEVICE_ID": "gateway-01"})
     assert config.topic == "devices/gateway-01/telemetry"
+
+
+def test_the_simulator_keeps_a_whitespace_only_topic_as_the_service_refuses_it():
+    # "" is compose's "unset" and takes the default; whitespace alone is a typo.
+    # The simulator keeps it as typed instead of quietly turning it into the
+    # default, and the service refuses the same value by name, so the two
+    # programs agree that it is a typo.
+    from telemetry.ingest import BrokerConfig
+
+    assert Config.from_env({"MQTT_TOPIC": "   "}).topic == "   "
+    with pytest.raises(ValueError, match="MQTT_TOPIC"):
+        BrokerConfig.from_env({"MQTT_TOPIC": "   "})

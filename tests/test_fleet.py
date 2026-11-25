@@ -519,3 +519,13 @@ def test_a_device_cap_outside_the_bounds_is_refused_by_name(value):
     # says so until the host runs out of memory.
     with pytest.raises(ValueError, match="MAX_DEVICES"):
         fleet.DeviceRegistry.from_env({"MAX_DEVICES": value})
+
+
+def test_the_device_cap_ceiling_is_the_documented_one_and_is_inclusive():
+    # The README says 1024, so the number is pinned here rather than only
+    # through the constant. The ceiling itself is allowed; one above is not.
+    assert fleet.MAX_DEVICES_CEILING == 1024
+    ceiling = str(fleet.MAX_DEVICES_CEILING)
+    assert fleet.DeviceRegistry.from_env({"MAX_DEVICES": ceiling}).max_devices == 1024
+    with pytest.raises(ValueError, match="MAX_DEVICES"):
+        fleet.DeviceRegistry.from_env({"MAX_DEVICES": str(fleet.MAX_DEVICES_CEILING + 1)})
