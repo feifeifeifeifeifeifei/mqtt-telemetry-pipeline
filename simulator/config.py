@@ -1,8 +1,9 @@
 """Simulator settings, read once from the environment and checked at startup.
 
 A bad value fails here, in the first second, instead of as a crash at frame
-300. The MQTT variable names are the service's own, so one `.env` serves both
-containers; the simulator's own knobs carry a SIM_ prefix.
+300. The MQTT variable names are the service's own, so one `.env` serves the
+service and every simulated gateway; the simulator's own knobs carry a SIM_
+prefix.
 """
 from __future__ import annotations
 
@@ -10,6 +11,8 @@ import os
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass
+
+from simulator.device import CYCLE_TICKS
 
 # The service's subscription filter. Its "+" level stands for the device id,
 # so this device publishes to devices/gateway-01/telemetry.
@@ -61,6 +64,9 @@ class Config:
     rate_hz: float
     seed: int
     fault_every: int
+    # The story tick of the first frame, so devices started together can be at
+    # different points of the story.
+    start_tick: int = 0
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> Config:
@@ -87,6 +93,7 @@ class Config:
             rate_hz=_number("SIM_RATE_HZ", source.get("SIM_RATE_HZ", ""), "1", float),
             seed=_number("SIM_SEED", source.get("SIM_SEED", ""), "7"),
             fault_every=_number("SIM_FAULT_EVERY", source.get("SIM_FAULT_EVERY", ""), "10"),
+            start_tick=_number("SIM_START_TICK", source.get("SIM_START_TICK", ""), "0"),
         )
         if config.password and not config.username:
             # The publisher logs in only when a username is set, so a lone
@@ -109,4 +116,8 @@ class Config:
             # 1 would put a catalogue entry in every frame, leaving no clean
             # baseline to compare against.
             raise ValueError("SIM_FAULT_EVERY must be 0 (off) or at least 2")
+        if not 0 <= config.start_tick < CYCLE_TICKS:
+            # The story repeats every CYCLE_TICKS frames, so a start inside the
+            # first cycle already reaches every part of it.
+            raise ValueError(f"SIM_START_TICK must be between 0 and {CYCLE_TICKS - 1}")
         return config

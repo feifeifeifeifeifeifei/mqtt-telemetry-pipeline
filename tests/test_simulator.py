@@ -54,11 +54,11 @@ def test_config_reads_every_documented_variable():
     config = Config.from_env({
         "MQTT_HOST": "broker", "MQTT_PORT": "1884", "MQTT_USERNAME": "u",
         "MQTT_PASSWORD": "p", "MQTT_TOPIC": "t", "SIM_DEVICE_ID": "d",
-        "SIM_RATE_HZ": "2.5", "SIM_SEED": "9", "SIM_FAULT_EVERY": "0",
+        "SIM_RATE_HZ": "2.5", "SIM_SEED": "9", "SIM_FAULT_EVERY": "0", "SIM_START_TICK": "80",
     })
     assert config == Config(
         host="broker", port=1884, username="u", password="p", topic="t",
-        device_id="d", rate_hz=2.5, seed=9, fault_every=0,
+        device_id="d", rate_hz=2.5, seed=9, fault_every=0, start_tick=80,
     )
 
 
@@ -136,6 +136,29 @@ def test_a_fault_spacing_of_one_or_below_zero_is_refused(every):
 def test_a_non_numeric_port_fails_at_startup():
     with pytest.raises(ValueError):
         Config.from_env({"MQTT_PORT": "abc"})
+
+
+@pytest.mark.parametrize("env", [{}, {"SIM_START_TICK": ""}], ids=["unset", "empty"])
+def test_the_story_starts_at_tick_0_unless_told_otherwise(env):
+    # Empty means unset, as for every number the simulator reads.
+    assert Config.from_env(env).start_tick == 0
+
+
+@pytest.mark.parametrize("start_tick", ["0", "239"])
+def test_the_start_tick_limits_themselves_are_accepted(start_tick):
+    # 239 is the last tick of the first cycle.
+    assert Config.from_env({"SIM_START_TICK": start_tick}).start_tick == int(start_tick)
+
+
+@pytest.mark.parametrize("start_tick", ["-1", "240"])
+def test_a_start_tick_outside_the_first_cycle_is_refused(start_tick):
+    with pytest.raises(ValueError, match="SIM_START_TICK must be between 0 and 239"):
+        Config.from_env({"SIM_START_TICK": start_tick})
+
+
+def test_a_start_tick_that_is_not_a_whole_number_is_refused():
+    with pytest.raises(ValueError, match="SIM_START_TICK='x' is not a whole number"):
+        Config.from_env({"SIM_START_TICK": "x"})
 
 
 # ------------------------------------------------------------------- device
@@ -317,7 +340,7 @@ def test_narration_flags_the_backup_burst_in_every_cycle():
 # ---------------------------------------------------------------------- cli
 
 SETTINGS = ("MQTT_HOST", "MQTT_PORT", "MQTT_USERNAME", "MQTT_PASSWORD", "MQTT_TOPIC",
-            "SIM_DEVICE_ID", "SIM_RATE_HZ", "SIM_SEED", "SIM_FAULT_EVERY")
+            "SIM_DEVICE_ID", "SIM_RATE_HZ", "SIM_SEED", "SIM_FAULT_EVERY", "SIM_START_TICK")
 
 
 @pytest.fixture
