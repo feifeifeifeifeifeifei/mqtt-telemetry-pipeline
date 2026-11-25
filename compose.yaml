@@ -1,7 +1,28 @@
-# Broker, service and simulator: docker compose up -d --build --wait
+# Broker, service and three simulated gateways, five containers in all:
+# docker compose up -d --build --wait
 #
 # Every published port is bound to 127.0.0.1: the demo broker is anonymous, so
 # neither it nor the API is reachable from outside this machine.
+
+# What every gateway shares, in two parts; Compose ignores top-level keys that
+# start with x-. The settings are an anchor of their own, merged inside each
+# gateway's environment: `<<` merges one level deep only, so an environment in
+# x-simulator would be replaced whole by the gateway's own, not combined with it.
+x-simulator-env: &simulator-env
+  MQTT_HOST: "broker"
+  # From .env when set there; otherwise empty, which means anonymous.
+  MQTT_USERNAME: "${MQTT_USERNAME:-}"
+  MQTT_PASSWORD: "${MQTT_PASSWORD:-}"
+  SIM_FAULT_EVERY: "${SIM_FAULT_EVERY:-10}"
+
+# The build and the start order, merged in at each gateway's top level. No
+# environment here: the gateway's own would replace it, as above.
+x-simulator: &simulator
+  build: ./simulator
+  depends_on:
+    service:
+      condition: service_healthy    # the first frame goes out only once the service listens
+
 services:
   broker:
     image: eclipse-mosquitto:2.0.22   # an exact tag: the demo must not change under you
@@ -31,14 +52,30 @@ services:
       timeout: 5s
       retries: 12
 
-  simulator:
-    build: ./simulator
+  # One container per device, named after it, so each can be stopped on its
+  # own. All three play the same 240-tick story, each joining it at its own
+  # tick, and their seeds place the faults and the noise differently. Each
+  # takes its build and its depends_on from x-simulator above.
+  gateway-01:
+    <<: *simulator
     environment:
-      MQTT_HOST: broker
-      MQTT_USERNAME: ${MQTT_USERNAME:-}
-      MQTT_PASSWORD: ${MQTT_PASSWORD:-}
-      SIM_SEED: ${SIM_SEED:-7}
-      SIM_FAULT_EVERY: ${SIM_FAULT_EVERY:-10}
-    depends_on:
-      service:
-        condition: service_healthy    # frame 0 goes out only once the service listens
+      <<: *simulator-env
+      SIM_DEVICE_ID: "gateway-01"
+      SIM_SEED: "${SIM_SEED:-7}"      # the only device SIM_SEED changes
+      SIM_START_TICK: "0"
+
+  gateway-02:
+    <<: *simulator
+    environment:
+      <<: *simulator-env
+      SIM_DEVICE_ID: "gateway-02"
+      SIM_SEED: "8"
+      SIM_START_TICK: "80"            # a third of the way into the story
+
+  gateway-03:
+    <<: *simulator
+    environment:
+      <<: *simulator-env
+      SIM_DEVICE_ID: "gateway-03"
+      SIM_SEED: "9"
+      SIM_START_TICK: "160"           # two thirds of the way in

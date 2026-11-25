@@ -2,3 +2,6 @@
 pytest==8.4.2
 httpx==0.28.1
 mutmut==3.8.0
+# tests/test_compose.py imports yaml. mutmut's libcst brings PyYAML on most
+# Pythons, but on 3.13 it brings pyyaml-ft instead, which does not import as yaml.
+pyyaml==6.0.3
