@@ -75,6 +75,7 @@ class Config:
         source = os.environ if env is None else env
         # `or`, as for every variable here: compose hands an unset one over as "".
         device_id = source.get("SIM_DEVICE_ID") or DEFAULT_DEVICE_ID
+        _raw = source.get("MQTT_TOPIC", "")
         config = cls(
             # Same rules as the service's BrokerConfig: compose turns an unset
             # variable into an empty string, so "" has to mean "unset" rather
@@ -88,7 +89,10 @@ class Config:
             # Empty means the default too: paho refuses to publish to "".
             # MQTT_TOPIC is the service's filter, so the "+" becomes this
             # device's id; a topic without one is published to as it is.
-            topic=(source.get("MQTT_TOPIC") or DEFAULT_TOPIC).replace("+", device_id),
+            # Same rule as the service's _topic_filter: "" is unset, whitespace
+            # alone is a typo the service refuses, whitespace around a real value
+            # is trimmed.
+            topic=(_raw.strip() or _raw or DEFAULT_TOPIC).replace("+", device_id),
             device_id=device_id,
             rate_hz=_number("SIM_RATE_HZ", source.get("SIM_RATE_HZ", ""), "1", float),
             seed=_number("SIM_SEED", source.get("SIM_SEED", ""), "7"),

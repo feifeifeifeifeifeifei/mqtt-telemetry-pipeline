@@ -868,7 +868,7 @@ The service reads these at startup:
 | `MQTT_PORT` | `1883`; 1–65535, empty counts as unset |
 | `MQTT_USERNAME` | unset: connect anonymously |
 | `MQTT_PASSWORD` | unset; needs `MQTT_USERNAME` |
-| `MQTT_TOPIC` | `devices/+/telemetry`; the subscription filter, whose `+` level is the device id, so `devices/gw-07/telemetry` is device `gw-07`. Exactly one `+` level, no `#` and no shared-subscription prefix (`$share/<group>/`, `$queue/`), or the service fails at startup; empty counts as unset |
+| `MQTT_TOPIC` | `devices/+/telemetry`; the subscription filter, whose `+` level is the device id, so `devices/gw-07/telemetry` is device `gw-07`. Exactly one `+` level, no `#` and no shared-subscription prefix (`$share/<group>/`, `$queue/`), or the service fails at startup. Empty counts as unset; whitespace around a filter is trimmed, but a value that is *only* whitespace is a typo and fails by name |
 | `MAX_DEVICES` | `32`; a whole number, at least 1. Messages from devices beyond it are counted and dropped, with one warning in the log; empty counts as unset |
 | `DEFAULT_DEVICE_ID` | `gateway-01`; the device the `/api/v1` paths without a device in them answer for. A value that is not a device id fails at startup; empty counts as unset |
 | `API_PORT` | `8000` |

@@ -364,6 +364,26 @@ def test_the_topic_comes_from_mqtt_topic():
     assert config.topic == "fleet/site-a/+/telemetry"
 
 
+@pytest.mark.parametrize(
+    "raw",
+    ["devices/+/telemetry ", " devices/+/telemetry", "\tdevices/+/telemetry\n"],
+    ids=["trailing", "leading", "tabs-and-newline"],
+)
+def test_whitespace_around_the_topic_filter_is_trimmed(raw):
+    # check_topic_filter cannot see this one: the levels still look right, so a
+    # trailing space passes validation and the service subscribes to a filter no
+    # publisher matches - connected, healthy and deaf. Every other setting here
+    # is already trimmed; this one was not.
+    assert BrokerConfig.from_env({"MQTT_TOPIC": raw}).topic == "devices/+/telemetry"
+
+
+def test_trimming_does_not_turn_a_blank_topic_into_the_default():
+    # "" is compose's "unset" and takes the default; whitespace alone is a typo
+    # and must still fail by name. Collapsing one into the other would hide it.
+    with pytest.raises(ValueError, match="MQTT_TOPIC"):
+        BrokerConfig.from_env({"MQTT_TOPIC": "   "})
+
+
 def test_an_empty_topic_means_the_default():
     # As with the credentials, compose hands ${MQTT_TOPIC:-} over as "". paho
     # refuses to subscribe to "", and inside on_connect that stops its loop.

@@ -42,6 +42,11 @@ REPEAT_DIAGNOSIS_SECONDS = 300.0
 PROBE_TIMEOUT_SECONDS = 2.0
 
 
+def _topic_filter(raw: str) -> str:
+    """MQTT_TOPIC: trim a real value, keep whitespace-only so it fails loudly."""
+    return raw.strip() or raw or DEFAULT_TOPIC_FILTER
+
+
 @dataclass(frozen=True)
 class BrokerConfig:
     host: str
@@ -81,7 +86,14 @@ class BrokerConfig:
             password=source.get("MQTT_PASSWORD") or None,
             # Empty means unset here too: subscribing to "" raises inside
             # on_connect, which ends paho's network loop for good.
-            topic=source.get("MQTT_TOPIC") or DEFAULT_TOPIC_FILTER,
+            # `raw.strip() or raw or default`, and the order matters. "" is
+            # compose's "unset", so it takes the default. Whitespace alone is
+            # not unset, it is a typo, and check_topic_filter names the variable
+            # for it - collapsing it to "" here would hide that. But whitespace
+            # *around* a real filter is a typo check_topic_filter cannot see:
+            # the levels still look right, so the service subscribes to a filter
+            # no publisher matches and sits there connected and deaf.
+            topic=_topic_filter(source.get("MQTT_TOPIC", "")),
         )
         if config.password and not config.username:
             # Credentials are only sent when a username is set, so this password

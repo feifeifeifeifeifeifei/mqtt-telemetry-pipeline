@@ -806,3 +806,12 @@ def test_the_service_routes_what_the_simulator_publishes_to_the_simulator_s_devi
 
     service, simulator = BrokerConfig.from_env(env), Config.from_env(env)
     assert device_id_from_topic(service.topic, simulator.topic) == simulator.device_id
+
+
+@pytest.mark.parametrize("raw", ["devices/+/telemetry ", " devices/+/telemetry"])
+def test_the_simulator_trims_the_topic_too(raw):
+    # One .env serves both containers: if only one side trimmed, the simulator
+    # would publish to "devices/gateway-01/telemetry " while the service
+    # subscribed to "devices/+/telemetry", and nothing would ever match.
+    config = Config.from_env({"MQTT_TOPIC": raw, "SIM_DEVICE_ID": "gateway-01"})
+    assert config.topic == "devices/gateway-01/telemetry"
