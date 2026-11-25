@@ -23,6 +23,9 @@ from telemetry.store import TelemetryStore, _configured_history_window
 DEVICE_ID_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"
 DEFAULT_TOPIC_FILTER = "devices/+/telemetry"
 DEFAULT_MAX_DEVICES = 32
+# At roughly 1 MB of retained window per device, this is about 1 GB - far past
+# anything this service is for, and still a number rather than no number.
+MAX_DEVICES_CEILING = 1024
 
 _DEVICE_ID = re.compile(DEVICE_ID_PATTERN)
 
@@ -96,8 +99,13 @@ class DeviceRegistry:
     """
 
     def __init__(self, max_devices: int = DEFAULT_MAX_DEVICES, history_window: int | None = None) -> None:
-        if max_devices < 1:
-            raise ValueError(f"MAX_DEVICES={max_devices} must be at least 1")
+        if not 1 <= max_devices <= MAX_DEVICES_CEILING:
+            # An upper bound because the cap is the memory bound: this class's
+            # docstring says the cap is what bounds what an anonymous broker can
+            # cost, and MAX_DEVICES=1000000 would make that sentence false
+            # without anything saying so. A typed extra zero is the realistic way
+            # that happens.
+            raise ValueError(f"MAX_DEVICES={max_devices} must be between 1 and {MAX_DEVICES_CEILING}")
         self._max_devices = max_devices
         # Read once, here: every device's window is the same size, whatever
         # happens to the environment after startup.

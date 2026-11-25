@@ -869,7 +869,7 @@ The service reads these at startup:
 | `MQTT_USERNAME` | unset: connect anonymously |
 | `MQTT_PASSWORD` | unset; needs `MQTT_USERNAME` |
 | `MQTT_TOPIC` | `devices/+/telemetry`; the subscription filter, whose `+` level is the device id, so `devices/gw-07/telemetry` is device `gw-07`. Exactly one `+` level, no `#` and no shared-subscription prefix (`$share/<group>/`, `$queue/`), or the service fails at startup. Empty counts as unset; whitespace around a filter is trimmed, but a value that is *only* whitespace is a typo and fails by name |
-| `MAX_DEVICES` | `32`; a whole number, at least 1. Messages from devices beyond it are counted and dropped, with one warning in the log; empty counts as unset |
+| `MAX_DEVICES` | `32`; a whole number from 1 to 1024. The ceiling is there because this cap *is* the memory bound, and one extra typed zero would quietly make that untrue. Messages from devices beyond the cap are counted and dropped, with one warning in the log; empty counts as unset |
 | `DEFAULT_DEVICE_ID` | `gateway-01`; the device the `/api/v1` paths without a device in them answer for. A value that is not a device id fails at startup; empty counts as unset |
 | `API_PORT` | `8000` |
 | `API_HOST` | `0.0.0.0` |

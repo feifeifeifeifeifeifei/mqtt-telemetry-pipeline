@@ -505,3 +505,17 @@ def test_racing_counters_smoke_check():
         "messages_invalid_topic": 3200,
         "messages_over_device_limit": 3200,
     }
+
+
+@pytest.mark.parametrize("value", ["1", "32", str(fleet.MAX_DEVICES_CEILING)])
+def test_a_device_cap_inside_the_bounds_is_accepted(value):
+    assert fleet.DeviceRegistry.from_env({"MAX_DEVICES": value}).max_devices == int(value)
+
+
+@pytest.mark.parametrize("value", ["0", "-1", str(fleet.MAX_DEVICES_CEILING + 1), "1000000"])
+def test_a_device_cap_outside_the_bounds_is_refused_by_name(value):
+    # The cap is the memory bound - DeviceRegistry's docstring says so. Without
+    # a ceiling, one extra typed zero makes that sentence false and nothing
+    # says so until the host runs out of memory.
+    with pytest.raises(ValueError, match="MAX_DEVICES"):
+        fleet.DeviceRegistry.from_env({"MAX_DEVICES": value})
