@@ -874,7 +874,7 @@ The service reads these at startup:
 | `API_PORT` | `8000` |
 | `API_HOST` | `0.0.0.0` |
 | `LOG_LEVEL` | `INFO`; `CRITICAL` `ERROR` `WARNING` `INFO` `DEBUG`, plus `WARN`, `FATAL` and `TRACE`; case-insensitive |
-| `HISTORY_WINDOW` | `3600` samples per device; a full window of well-formed telemetry is about 3.7 MB, so 32 full devices take about 120 MB (malformed messages keep more per sample) |
+| `HISTORY_WINDOW` | `3600` samples per device; a whole number, at least 1 — `0` and negatives fail by name rather than being clamped, the same rule `MAX_DEVICES` follows. Empty counts as unset. A full window of well-formed telemetry is about 3.7 MB, so 32 full devices take about 120 MB (malformed messages keep more per sample) |
 | `MAX_CLOCK_SKEW_SECONDS` | `60` |
 | `STALE_AFTER_SECONDS` | `30` |
 

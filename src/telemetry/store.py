@@ -66,12 +66,27 @@ TIMESTAMP_SUBSTITUTED = "timestamp_substituted"
 
 
 def _configured_history_window(env: Mapping[str, str] | None = None) -> int:
-    # max(1, ...): HISTORY_WINDOW=0 would build deque(maxlen=0), silently making
-    # median and p95 disappear for ever. A non-numeric value still raises at
-    # construction, which is the right, loud behaviour. `env` is injectable for
-    # DeviceRegistry.from_env, which reads every setting from one mapping.
+    """HISTORY_WINDOW, by the same rules as MAX_DEVICES.
+
+    It used to clamp with max(1, ...), which kept HISTORY_WINDOW=0 from silently
+    building deque(maxlen=0) and making median and p95 disappear for ever. That
+    fixed the dangerous half and left the quiet half: you asked for 0, you got 1,
+    and nothing said so. Its sibling setting rejects 0 by name, so this one does
+    too - one codebase, one answer to "what does a bad value do".
+
+    An empty string is what compose sends for a variable nobody set, so it means
+    unset here as everywhere else. `env` is injectable for DeviceRegistry.from_env,
+    which reads every setting from one mapping.
+    """
     source = os.environ if env is None else env
-    return max(1, int(source.get("HISTORY_WINDOW", DEFAULT_HISTORY_WINDOW)))
+    raw = source.get("HISTORY_WINDOW", "").strip() or str(DEFAULT_HISTORY_WINDOW)
+    try:
+        window = int(raw)
+    except ValueError:
+        raise ValueError(f"HISTORY_WINDOW={raw!r} is not a whole number") from None
+    if window < 1:
+        raise ValueError(f"HISTORY_WINDOW={window} must be at least 1")
+    return window
 
 
 @dataclass

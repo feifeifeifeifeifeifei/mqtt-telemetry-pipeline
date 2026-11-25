@@ -7,7 +7,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from telemetry.store import RunningStats, TelemetryStore, TopKTracker
+from telemetry.store import DEFAULT_HISTORY_WINDOW, RunningStats, TelemetryStore, TopKTracker
 from telemetry.validation import validate_payload
 
 START = datetime(2026, 10, 19, 12, 0, 0, tzinfo=timezone.utc)
@@ -293,12 +293,29 @@ def test_the_history_window_comes_from_the_environment(monkeypatch):
     assert TelemetryStore().window_capacity() == 7
 
 
-def test_a_zero_history_window_cannot_silently_disable_the_window(monkeypatch):
-    monkeypatch.setenv("HISTORY_WINDOW", "0")
-    store = TelemetryStore()
-    store.record(message(1))
-    assert store.window_capacity() == 1
-    assert len(store.window()) == 1
+@pytest.mark.parametrize("value", ["0", "-1", "-3600"])
+def test_a_zero_or_negative_history_window_is_refused_by_name(monkeypatch, value):
+    # deque(maxlen=0) would drop every sample and make median and p95 vanish
+    # from the response with nothing raised. Clamping to 1 stopped that but
+    # still handed back a window nobody asked for; MAX_DEVICES refuses the same
+    # input by name, and so does this.
+    monkeypatch.setenv("HISTORY_WINDOW", value)
+    with pytest.raises(ValueError, match="HISTORY_WINDOW"):
+        TelemetryStore()
+
+
+@pytest.mark.parametrize("value", ["", "   "])
+def test_an_empty_history_window_means_unset(monkeypatch, value):
+    # compose turns a variable nobody set into an empty string; int("") used to
+    # raise at import with a message naming neither the variable nor the value.
+    monkeypatch.setenv("HISTORY_WINDOW", value)
+    assert TelemetryStore().window_capacity() == DEFAULT_HISTORY_WINDOW
+
+
+def test_a_non_numeric_history_window_is_refused_by_name(monkeypatch):
+    monkeypatch.setenv("HISTORY_WINDOW", "lots")
+    with pytest.raises(ValueError, match="HISTORY_WINDOW='lots'"):
+        TelemetryStore()
 
 
 def test_window_capacity_is_the_configured_size_not_the_fill_level():
