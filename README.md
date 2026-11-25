@@ -895,6 +895,18 @@ dropped.
 
 ## Limitations
 
+- **A device that reaches `MAX_DEVICES` never gets in, and nothing already in is evicted.**
+  The registry is first-come, first-served with no eviction and no seat held for the
+  default device. The broker in this demo is anonymous, so anyone who can reach it can
+  publish to `devices/<any-name>/telemetry`: `MAX_DEVICES` invented names fill the cap, and
+  from then on every real device is refused, including the `DEFAULT_DEVICE_ID` the
+  deprecated single-device endpoints resolve to — those answer 503 for as long as the
+  process lives. It is visible rather than silent (`messages_over_device_limit` in
+  `/api/v1/devices`, and one warning in the log), and a restart clears it, but neither is a
+  defence. Nothing here is a fix: the fix is an authenticated broker with an ACL that ties
+  a client to its own topic, which is what a real deployment would have and what makes
+  eviction policy a question worth answering rather than a patch over an open door. Until
+  then, treat `MAX_DEVICES` as a memory bound, not as access control.
 - The simulator is a demo device, not a statistical model: four-minute cycles, a catalogue
   entry every ten seconds in a fixed order, and time compressed so that a battery drains in
   minutes. It exists to drive every path of the service on cue, not to resemble a real
