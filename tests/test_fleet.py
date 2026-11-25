@@ -5,6 +5,7 @@ and these tests would only slow every mutant down.
 """
 from __future__ import annotations
 
+import pathlib
 import threading
 import time
 
@@ -420,6 +421,49 @@ class CountingLock:
 
 
 FLEET_COUNTERS_METHODS = ("record_received", "record_invalid_topic", "record_over_device_limit", "snapshot")
+
+# The registry needs the same guard. Without it, removing `with self._lock` from
+# get() or snapshot() left all 652 tests green: neither iterates a container in
+# Python, so a missing lock there is a torn read, not an exception, and only
+# counting acquisitions can see it.
+DEVICE_REGISTRY_METHODS = ("get_or_create", "get", "snapshot")
+# Read without the lock on purpose: both are set in __init__ and never written
+# again, which is the same exemption TelemetryStore.window_capacity documents.
+DEVICE_REGISTRY_LOCK_FREE = ("max_devices", "history_window")
+
+
+def test_the_lock_check_covers_every_public_device_registry_method():
+    # A method added later must join one of the two lists above, or this fails.
+    public = {
+        name for name, value in vars(fleet.DeviceRegistry).items()
+        if not name.startswith("_") and not isinstance(value, classmethod)
+    }
+    assert public == set(DEVICE_REGISTRY_METHODS) | set(DEVICE_REGISTRY_LOCK_FREE)
+
+
+@pytest.mark.parametrize("method", DEVICE_REGISTRY_METHODS)
+def test_every_device_registry_method_takes_the_lock_exactly_once(method):
+    registry = fleet.DeviceRegistry(max_devices=4)
+    registry.get_or_create("gateway-01")            # one device to look up
+    lock = registry._lock = CountingLock()          # type: ignore[assignment]
+    argument = ("gateway-01",) if method != "snapshot" else ()
+    getattr(registry, method)(*argument)
+    assert lock.acquisitions == 1
+    assert not lock._lock.locked()
+
+
+@pytest.mark.parametrize("name", DEVICE_REGISTRY_LOCK_FREE)
+def test_the_lock_free_registry_properties_really_are_immutable(name):
+    # The exemption above is only sound while nothing writes these after
+    # __init__. Reading them must take no lock at all.
+    registry = fleet.DeviceRegistry(max_devices=4)
+    lock = registry._lock = CountingLock()          # type: ignore[assignment]
+    getattr(registry, name)
+    assert lock.acquisitions == 0
+    assert f"self._{name} =" not in (
+        pathlib.Path(fleet.__file__).read_text(encoding="utf-8")
+        .split("def get_or_create", 1)[1]
+    ), f"_{name} is written after __init__; it can no longer be read without the lock"
 
 
 def test_the_lock_check_covers_every_public_fleet_counters_method():
