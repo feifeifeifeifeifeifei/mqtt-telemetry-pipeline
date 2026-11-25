@@ -59,20 +59,20 @@ def run(config: Config) -> None:
     client.connect_async(config.host, config.port)
     client.loop_start()
     try:
-        # The clock starts at the first connection, so frame 0 is not
+        # The clock starts at the first connection, so the first frame is not
         # published into the void.
         while not connected.wait(timeout=5):
             LOGGER.info("waiting for the broker at %s:%s", config.host, config.port)
         period = 1 / config.rate_hz
         faults = (f"one catalogue entry per {config.fault_every} frames"
                   if config.fault_every else "fault injection off")
-        LOGGER.info("%s -> %s every %.2f s, seed %d, %s",
-                    config.device_id, config.topic, period, config.seed, faults)
+        LOGGER.info("%s -> %s every %.2f s, seed %d, from tick %d, %s",
+                    config.device_id, config.topic, period, config.seed, config.start_tick, faults)
         next_at = time.monotonic()
-        tick = 0
+        tick = config.start_tick
         while True:
-            # Stamped with the real clock, not start + tick / rate: the service
-            # judges each timestamp against its own receive time.
+            # Stamped with the real clock, not on the dry run's schedule: the
+            # service judges each timestamp against its own receive time.
             frame = make_frame(tick, datetime.now(timezone.utc), config)
             info = client.publish(config.topic, frame.payload, qos=0)
             for line in narrate(frame):

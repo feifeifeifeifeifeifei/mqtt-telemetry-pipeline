@@ -41,9 +41,9 @@ def make_frame(tick: int, now: datetime, config: Config) -> Frame:
 
 
 def generate(config: Config, count: int, start: datetime) -> Iterator[Frame]:
-    """`count` frames on the planned schedule: frame N is stamped start + N / rate."""
-    for tick in range(count):
-        yield make_frame(tick, start + timedelta(seconds=tick / config.rate_hz), config)
+    """Frame n is story tick config.start_tick + n, stamped start + n / rate."""
+    for n in range(count):
+        yield make_frame(config.start_tick + n, start + timedelta(seconds=n / config.rate_hz), config)
 
 
 def narrate(frame: Frame) -> list[str]:

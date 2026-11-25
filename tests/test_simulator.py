@@ -298,6 +298,20 @@ def test_frames_are_stamped_on_the_planned_schedule():
     assert stamps == [START, START + timedelta(seconds=0.5), START + timedelta(seconds=1)]
 
 
+@pytest.mark.parametrize("start_tick", [1, 80, 160, 239])
+def test_a_later_start_tick_plays_the_same_frames_from_part_way_through_the_story(start_tick):
+    # A frame is a function of (seed, tick, time) alone, so starting at tick K
+    # only shifts the story: frame n is the start-0 device's frame K + n,
+    # stamped at frame n's time.
+    expected = [
+        make_frame(start_tick + n, START + timedelta(seconds=n / DEFAULT.rate_hz), DEFAULT)
+        for n in range(2 * CYCLE_TICKS)
+    ]
+    # Faults stay on, and every catalogue entry is among these frames.
+    assert {frame.fault for frame in expected} == {None, *CATALOGUE}
+    assert list(generate(replace(DEFAULT, start_tick=start_tick), 2 * CYCLE_TICKS, START)) == expected
+
+
 def test_seed_7_frame_57_is_the_documented_example():
     # The README quotes this message; it must stay byte-for-byte reproducible.
     frame = make_frame(57, START + timedelta(seconds=57), DEFAULT)
@@ -377,6 +391,18 @@ def test_without_out_the_frames_go_to_stdout_and_the_story_to_the_log(default_en
     assert "tick 0: gateway powered on, uptime starts at 0" in caplog.messages
 
 
+def test_a_dry_run_with_a_start_tick_joins_the_story_part_way(default_env, monkeypatch, capsysbinary, caplog):
+    # --start stamps the first frame, whichever tick it is. A device that joins
+    # part-way was not just switched on, so it never says so.
+    monkeypatch.setenv("SIM_START_TICK", "80")
+    caplog.set_level(logging.INFO, logger="simulator")
+    assert main(["--count", "31", "--start", "2026-10-19T08:00:00+00:00"]) == 0
+    first = json.loads(capsysbinary.readouterr().out.split(b"\n", 1)[0])
+    assert (first["sequence"], first["timestamp"]) == (80, "2026-10-19T08:00:00+00:00")
+    assert "tick 110: batch done: load drops, fans cool the chips" in caplog.messages
+    assert not [message for message in caplog.messages if "powered on" in message]
+
+
 ROOT = Path(__file__).resolve().parent.parent
 
 
@@ -451,6 +477,15 @@ def test_the_help_calls_the_count_n(capsys):
     with pytest.raises(SystemExit):
         main(["--help"])
     assert "[--count N]" in capsys.readouterr().out
+
+
+def test_the_help_says_start_is_the_time_of_the_first_frame(capsys):
+    # Not "frame 0": with SIM_START_TICK the first frame can be any tick.
+    with pytest.raises(SystemExit):
+        main(["--help"])
+    # Joined, because argparse wraps the help to the terminal's width.
+    help_text = " ".join(capsys.readouterr().out.split())
+    assert "time of the first frame, ISO 8601; no offset means UTC (default: now)" in help_text
 
 
 def test_live_mode_hands_over_to_the_publisher_and_exits_cleanly_on_ctrl_c(default_env, monkeypatch):
@@ -647,6 +682,12 @@ def test_run_publishes_the_stream_stamped_with_the_real_clock(client):
         assert payload == make_frame(tick, stamp, config).payload
 
 
+def test_run_publishes_from_the_start_tick(client):
+    # As in the dry run, frame n is story tick start_tick + n.
+    run_until_interrupted(replace(DEFAULT, start_tick=80))
+    assert [json.loads(payload)["sequence"] for payload in client.payloads] == [80, 81, 82]
+
+
 def test_pacing_absorbs_the_send_time_and_never_bursts_to_catch_up(client, clock):
     # 2 Hz, so a frame is due every 0.5 s. The second publish stalls for 2 s.
     client.publish_seconds = [0.1, 2.0, 0.1]
@@ -654,17 +695,23 @@ def test_pacing_absorbs_the_send_time_and_never_bursts_to_catch_up(client, clock
     assert clock.sleeps == [0.4, 0.0, 0.4]
 
 
-@pytest.mark.parametrize(("changes", "settings"), [
-    ({}, "every 1.00 s, seed 7, one catalogue entry per 10 frames"),
-    ({"rate_hz": 2.0, "fault_every": 0}, "every 0.50 s, seed 7, fault injection off"),
-], ids=["defaults", "faults-off"])
-def test_run_logs_its_settings_and_then_the_story(client, caplog, changes, settings):
+TICK_0_STORY = ["tick 0: gateway powered on, uptime starts at 0", "tick 0: idle: background load only"]
+
+
+@pytest.mark.parametrize(("changes", "settings", "story"), [
+    ({}, "every 1.00 s, seed 7, from tick 0, one catalogue entry per 10 frames", TICK_0_STORY),
+    ({"rate_hz": 2.0, "fault_every": 0}, "every 0.50 s, seed 7, from tick 0, fault injection off", TICK_0_STORY),
+    # Joining part-way, it was not just powered on. Seed 7's ticks 80-82 have
+    # no story beat and no catalogue entry, so the settings are the last line.
+    ({"start_tick": 80}, "every 1.00 s, seed 7, from tick 80, one catalogue entry per 10 frames", []),
+], ids=["defaults", "faults-off", "from-tick-80"])
+def test_run_logs_its_settings_and_then_the_story(client, caplog, changes, settings, story):
     caplog.set_level(logging.INFO, logger="simulator")
     run_until_interrupted(replace(DEFAULT, **changes))
-    assert caplog.messages[:3] == [
+    assert caplog.messages == [
         "connected to localhost:1883",
         f"gateway-01 -> devices/gateway-01/telemetry {settings}",
-        "tick 0: gateway powered on, uptime starts at 0",
+        *story,
     ]
 
 

@@ -26,7 +26,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--count", type=int, metavar="N",
                         help="write N frames as JSON Lines and exit (no broker)")
     parser.add_argument("--start", type=datetime.fromisoformat,
-                        help="time of frame 0, ISO 8601; no offset means UTC (default: now)")
+                        help="time of the first frame, ISO 8601; no offset means UTC (default: now)")
     parser.add_argument("--out", type=Path, help="write the dry run to this file instead of stdout")
     return parser
 
