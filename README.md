@@ -874,7 +874,7 @@ The service reads these at startup:
 | `MQTT_USERNAME` | unset: connect anonymously |
 | `MQTT_PASSWORD` | unset; needs `MQTT_USERNAME` |
 | `MQTT_TOPIC` | `devices/+/telemetry`; the subscription filter, whose `+` level is the device id, so `devices/gw-07/telemetry` is device `gw-07`. Exactly one `+` level, no `#` and no shared-subscription prefix (`$share/<group>/`, `$queue/`), or the service fails at startup. Empty counts as unset; whitespace around a filter is trimmed, but a value that is *only* whitespace is a typo and fails by name |
-| `MAX_DEVICES` | `32`; a whole number from 1 to 1024. The ceiling is there because this cap *is* the memory bound, and one extra typed zero would quietly make that untrue. Messages from devices beyond the cap are counted and dropped, with one warning in the log; empty counts as unset |
+| `MAX_DEVICES` | `32`; a whole number from 1 to 1024. The ceiling refuses a runaway value of thousands or more; it does not make the cap small, and `320` is still accepted. The memory bound is `MAX_DEVICES` × the history window (see `HISTORY_WINDOW` for the per-device figure, about 3.7 MB at the default). Messages from devices beyond the cap are counted and dropped, with one warning in the log; empty counts as unset |
 | `DEFAULT_DEVICE_ID` | `gateway-01`; the device the `/api/v1` paths without a device in them answer for. A value that is not a device id fails at startup; empty counts as unset |
 | `API_PORT` | `8000` |
 | `API_HOST` | `0.0.0.0` |
@@ -895,13 +895,14 @@ dropped.
 
 ## Limitations
 
-- **A device that reaches `MAX_DEVICES` never gets in, and nothing already in is evicted.**
+- **Once `MAX_DEVICES` devices are registered, a new device never gets in, and nothing already in is evicted.**
   The registry is first-come, first-served with no eviction and no seat held for the
   default device. The broker in this demo is anonymous, so anyone who can reach it can
   publish to `devices/<any-name>/telemetry`: `MAX_DEVICES` invented names fill the cap, and
   from then on every real device is refused, including the `DEFAULT_DEVICE_ID` the
-  deprecated single-device endpoints resolve to — those answer 503 for as long as the
-  process lives. It is visible rather than silent (`messages_over_device_limit` in
+  deprecated single-device endpoints resolve to. Of those endpoints, `system-status` then
+  answers 503 for as long as the process lives, and the other three answer 200 with empty
+  results. It is visible rather than silent (`messages_over_device_limit` in
   `/api/v1/devices`, and one warning in the log), and a restart clears it, but neither is a
   defence. Nothing here is a fix: the fix is an authenticated broker with an ACL that ties
   a client to its own topic, which is what a real deployment would have and what makes

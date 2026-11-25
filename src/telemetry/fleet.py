@@ -23,8 +23,10 @@ from telemetry.store import TelemetryStore, _configured_history_window
 DEVICE_ID_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"
 DEFAULT_TOPIC_FILTER = "devices/+/telemetry"
 DEFAULT_MAX_DEVICES = 32
-# At roughly 1 MB of retained window per device, this is about 1 GB - far past
-# anything this service is for, and still a number rather than no number.
+# A full default window of well-formed telemetry is about 3.7 MB per device, so
+# 1024 full devices come to about 3.8 GB - far past anything this service is for,
+# and still a number rather than no number. It refuses a runaway value; the
+# memory bound itself is max_devices times the history window.
 MAX_DEVICES_CEILING = 1024
 
 _DEVICE_ID = re.compile(DEVICE_ID_PATTERN)

@@ -66,7 +66,9 @@ TIMESTAMP_SUBSTITUTED = "timestamp_substituted"
 
 
 def _configured_history_window(env: Mapping[str, str] | None = None) -> int:
-    """HISTORY_WINDOW, by the same rules as MAX_DEVICES.
+    """HISTORY_WINDOW: a whole number, at least 1, refused by name; empty means unset.
+
+    The lower bound is the one MAX_DEVICES has. Unlike MAX_DEVICES it has no ceiling.
 
     It used to clamp with max(1, ...), which kept HISTORY_WINDOW=0 from silently
     building deque(maxlen=0) and making median and p95 disappear for ever. That

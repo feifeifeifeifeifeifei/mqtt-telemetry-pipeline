@@ -372,8 +372,9 @@ def test_the_topic_comes_from_mqtt_topic():
 def test_whitespace_around_the_topic_filter_is_trimmed(raw):
     # check_topic_filter cannot see this one: the levels still look right, so a
     # trailing space passes validation and the service subscribes to a filter no
-    # publisher matches - connected, healthy and deaf. Every other setting here
-    # is already trimmed; this one was not.
+    # publisher matches - connected, healthy and deaf. The other settings are
+    # already trimmed, except MQTT_USERNAME and MQTT_PASSWORD, which are passed
+    # through as typed; this one was not.
     assert BrokerConfig.from_env({"MQTT_TOPIC": raw}).topic == "devices/+/telemetry"
 
 
