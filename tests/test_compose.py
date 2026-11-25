@@ -61,7 +61,11 @@ def test_each_device_is_named_after_its_service(name):
 
 def test_the_seeds_differ_and_only_gateway_01_follows_sim_seed():
     seeds = [environment(name)["SIM_SEED"] for name in FLEET_DEVICES]
-    assert len(set(seeds)) == len(seeds)
+    # Compare what the containers get when SIM_SEED is unset: Compose replaces
+    # ${NAME:-default} with its default, so the text "${SIM_SEED:-7}" and a
+    # literal "7" are the same seed.
+    defaults = [re.sub(r"\$\{\w+:-([^}]*)\}", r"\1", seed) for seed in seeds]
+    assert len(set(defaults)) == len(defaults)
     # The text itself: YAML leaves ${...} alone, Compose fills it in. Seed 7
     # is the one the README's examples come from.
     assert environment("gateway-01")["SIM_SEED"] == "${SIM_SEED:-7}"
