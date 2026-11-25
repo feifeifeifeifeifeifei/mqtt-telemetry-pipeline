@@ -88,7 +88,7 @@ def test_system_status_is_503_before_any_telemetry():
     response = client_with().get("/api/v1/system-status")
     assert response.status_code == 503
     body = response.json()
-    assert body["detail"] == "no telemetry received yet"
+    assert body["detail"] == "no telemetry received yet from gateway-01"
     assert body["broker_connected"] is False
     assert body["messages_received"] == 0
     assert body["service_uptime_seconds"] >= 0
@@ -409,7 +409,10 @@ def test_before_the_default_device_appears_the_legacy_endpoints_answer_as_before
     ingestor.handle_message("devices/gw-other/telemetry", payload_from("gw-other", disk_usage_percent=97.0))
     status = client.get("/api/v1/system-status")
     assert status.status_code == 503
-    assert status.json()["detail"] == "no telemetry received yet"
+    # Naming the device is the whole point here: gw-other is streaming, so an
+    # unqualified "no telemetry received yet" beside messages_received: 0 would
+    # read as "the service has nothing", which is false.
+    assert status.json()["detail"] == "no telemetry received yet from gateway-01"
     assert status.json()["messages_received"] == 0
     # The same answers an empty single-device service gave, whatever the other
     # device has sent.
@@ -492,7 +495,7 @@ def test_a_known_device_with_no_valid_telemetry_is_503():
     response = client.get("/api/v1/devices/gw-a/system-status")
     assert response.status_code == 503
     body = response.json()
-    assert body["detail"] == "no telemetry received yet"
+    assert body["detail"] == "no telemetry received yet from gw-a"
     assert body["messages_received"] == 2
 
 

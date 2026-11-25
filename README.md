@@ -111,7 +111,7 @@ Base URL `http://localhost:8000`. Interactive docs at `/docs`.
 | Method | Path | Returns | Other codes |
 |---|---|---|---|
 | `GET` | `/health` | Process liveness, broker connection, message count | — |
-| `GET` | `/api/v1/system-status` | Freshest valid value **per field**, each with its own `as_of` and age | `503` before any telemetry |
+| `GET` | `/api/v1/system-status` | Freshest valid value **per field**, each with its own `as_of` and age, for the default device | `503` until the **default device** has sent a valid message — other devices may be streaming |
 | `GET` | `/api/v1/statistics` | Per metric: all-time count/min/max/mean/stdev + windowed median/p95, plus window capacity/fill and `data_quality` | — |
 | `GET` | `/api/v1/statistics/top-temperatures?component=cpu\|gpu` | All-time 3 highest and 3 lowest readings with timestamps | `422` on an unknown component |
 | `GET` | `/api/v1/anomalies` | Threshold violations grouped into episodes, plus the active rule set | — |
@@ -172,13 +172,18 @@ report, so all three are null. When the payload timestamp was substituted, the f
 carries `"timestamp_source": "receipt-unparseable"` or `"receipt-implausible"`; the
 normal case omits the key entirely.
 
-Before the first message arrives the endpoint returns **503**, with enough to tell
+Before that device's first valid message the endpoint returns **503**, with enough to tell
 "started a few seconds ago" from "misconfigured and has never received anything":
 
 ```json
-{"detail": "no telemetry received yet", "broker_connected": true, "messages_received": 0,
- "service_uptime_seconds": 8.4}
+{"detail": "no telemetry received yet from gateway-01", "broker_connected": true,
+ "messages_received": 0, "service_uptime_seconds": 8.4}
 ```
+
+Both the detail and `messages_received` are about **that one device**. Under a single
+device they were the same as the fleet's; with several, this can be 503 while other devices
+stream, which is why the device is named rather than left to be inferred. The fleet-wide
+count is `/health`, and the per-device counts are in `/api/v1/devices`.
 
 **Statistics** after one full cycle (4:00). All-time figures are exact and independent of
 retention; median and p95 come from the window and are labelled as such.

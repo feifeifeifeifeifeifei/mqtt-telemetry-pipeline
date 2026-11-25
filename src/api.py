@@ -187,10 +187,16 @@ def create_app(
             # and a caller could not separate "the device has no data" from "the
             # service is broken". The two extra fields separate "started half a
             # second ago" from "misconfigured and has never received anything".
+            #
+            # The device is named because messages_received beside it is this
+            # device's count, not the fleet's. Under one device the two were the
+            # same number and "no telemetry received yet" was true of both; with
+            # a fleet it can be 503 here while other devices stream, and the
+            # unqualified sentence would read as "the service has nothing".
             return JSONResponse(
                 status_code=503,
                 content={
-                    "detail": "no telemetry received yet",
+                    "detail": f"no telemetry received yet from {device_id}",
                     "broker_connected": broker_connected(),
                     "messages_received": received,
                     "service_uptime_seconds": uptime_seconds(),
