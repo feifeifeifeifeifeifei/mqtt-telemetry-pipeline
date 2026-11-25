@@ -2,10 +2,11 @@
 
 [![CI](https://github.com/feifeifeifeifeifeifei/mqtt-telemetry-pipeline/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/feifeifeifeifeifeifei/mqtt-telemetry-pipeline/actions/workflows/ci.yml)
 
-A small end-to-end telemetry pipeline. A simulated edge gateway publishes system telemetry
-over MQTT; a Python service subscribes, validates every reading, keeps statistics, groups
-threshold violations into anomaly episodes and serves all of it over a small REST API. A
-mosquitto broker sits between the two, and one `docker compose` command runs all three.
+A small end-to-end telemetry pipeline. Three simulated edge gateways publish system
+telemetry over MQTT; a Python service subscribes, validates every reading, keeps statistics
+per device, groups threshold violations into anomaly episodes and serves all of it over a
+small REST API. A mosquitto broker sits between them, and one `docker compose` command runs
+all five containers.
 
 The simulator is scripted on purpose. Every four minutes it replays a compressed day —
 load, cooling, a charger, a disk cleanup, a firmware reboot and a short backup burst — and
@@ -21,21 +22,36 @@ Needs Docker with Compose v2. Nothing else: no local Python, no broker to instal
 docker compose up -d --build --wait
 ```
 
-This builds the service and simulator images, starts them with an `eclipse-mosquitto`
-broker, and returns once the service is subscribed and the simulator has started. The API
-is then at `http://localhost:8000`, with interactive docs at `/docs`. Running it again is
-harmless: compose only recreates what changed.
+This builds the service and simulator images and starts five containers: an
+`eclipse-mosquitto` broker, the service, and three simulated gateways, `gateway-01`,
+`gateway-02` and `gateway-03`. It returns once the service is subscribed and the gateways
+have started. The API is then at `http://localhost:8000`, with interactive docs at `/docs`.
+Running it again is harmless: compose only recreates what changed.
 
-Follow the simulator's narration — every story beat, and every injected fault with the
+If this machine has run an older version of this project, which had a single `simulator`
+service, run this once, and then the `up` command above:
+
+```bash
+docker compose down --remove-orphans
+```
+
+The new compose.yaml no longer names that container, so `up` only warns about it as an
+orphan and leaves it running, and it goes on publishing as `gateway-01`, mixed in with the
+new one. `--remove-orphans` removes it.
+
+Follow `gateway-01`'s narration — every story beat, and every injected fault with the
 verdict to expect:
 
 ```bash
-docker compose logs -f simulator
+docker compose logs -f gateway-01
 ```
+
+Add `gateway-02 gateway-03` to the command to follow all three at once; each line is
+prefixed with the gateway it came from.
 
 To see the service before any telemetry arrives — the 503 shown under API — start from
 nothing (`docker compose down` if the stack is up), bring up the broker and the service,
-ask, then start the simulator:
+ask, then start the gateways:
 
 ```bash
 docker compose up -d --build --wait broker service
@@ -46,7 +62,7 @@ curl -i localhost:8000/api/v1/system-status
 ```
 
 ```bash
-docker compose up -d simulator
+docker compose up -d
 ```
 
 On Windows PowerShell 5.1 type `curl.exe`: plain `curl` there is an alias for
@@ -59,10 +75,34 @@ nothing installed. The `+` matches any device id, and `-v` prints each message's
 docker compose exec broker mosquitto_sub -t devices/+/telemetry -v
 ```
 
-`docker compose stop simulator` followed by a 30-second wait shows every reading go stale;
-`docker compose down` stops and removes all three containers. The broker is published on
-`127.0.0.1:1883` and the API on `127.0.0.1:8000`, so neither is reachable from other
-machines.
+To watch one gateway go quiet while the others carry on, stop it:
+
+```bash
+docker compose stop gateway-02
+```
+
+Wait 30 seconds, then list the devices:
+
+```bash
+curl localhost:8000/api/v1/devices
+```
+
+`gateway-02` now shows `"stale":true`, and its `last_seen_age_seconds` keeps growing, while
+`gateway-01` and `gateway-03` stay `"stale":false`. Start it again:
+
+```bash
+docker compose start gateway-02
+```
+
+It begins its part of the story again at tick 80 (see The device simulator), with an uptime
+of 80 seconds. The service counts an `uptime_regressed` for it only if its uptime was more
+than 80 seconds when it stopped. Stopped within 80 seconds after the story's firmware
+reboot, its uptime was below 80, so the restart moves it forward and nothing is counted.
+
+`docker compose stop gateway-01 gateway-02 gateway-03` followed by a 30-second wait shows
+every reading go stale; `docker compose down` stops and removes all five containers. The
+broker is published on `127.0.0.1:1883` and the API on `127.0.0.1:8000`, so neither is
+reachable from other machines.
 
 ## API
 
@@ -87,14 +127,15 @@ device the service holds no state for, and `422` for an id that cannot be a devi
 letters, digits, `.`, `_` or `-`, starting with a letter or digit (an empty id, or one
 containing `/`, cannot match the route and gets a plain `404`). The four `/api/v1` paths
 without a device in them came first and answer for one device, `DEFAULT_DEVICE_ID`
-(`gateway-01`, the simulator), exactly as its `/api/v1/devices/gateway-01/...` routes do;
-`/docs` marks them deprecated. Until that device's first message they answer as an empty
-service does: `503` from `system-status`, empty results from the rest. `messages_received`
-in `/health` counts every message the service received, including those no device took.
+(`gateway-01`, the first gateway in compose.yaml), exactly as its
+`/api/v1/devices/gateway-01/...` routes do; `/docs` marks them deprecated. Until that
+device's first message they answer as an empty service does: `503` from `system-status`,
+empty results from the rest. `messages_received` in `/health` counts every message the
+service received, including those no device took.
 
 `/health` exists so compose can wait for readiness instead of sleeping a fixed time (see
-Packaging). Every response below is real output of this code, produced by feeding the
-default simulator stream (seed 7, first message at 08:00:00 UTC) through the service on its
+Packaging). Every response below is real output of this code, produced by feeding
+`gateway-01`'s stream (seed 7, first message at 08:00:00 UTC) through the service on its
 1 Hz schedule, and trimmed to a few fields where the full body would be long. Readings are
 deterministic per seed and frame number, so a **freshly started** run reproduces these at
 the same point of its **first** cycle; the noise is seeded on the absolute frame number
@@ -262,9 +303,22 @@ thresholds, not just the ones firing.
 
 ## The device simulator
 
-`simulator/` stands in for a field gateway, `gateway-01`. It is its own package and its own
-image, and it never imports the service: the two share an MQTT topic and nothing else, and
-the contract between them lives in the tests.
+`simulator/` stands in for a field gateway, and compose runs it three times, one container
+per gateway. It is its own package and its own image, and it never imports the service: the
+two share an MQTT topic and nothing else, and the contract between them lives in the tests.
+
+The three gateways play the same story, each with its own seed and from its own starting
+point:
+
+| Gateway | `SIM_SEED` | `SIM_START_TICK` | Joins the story at |
+|---|---|---|---|
+| `gateway-01` | 7, or `SIM_SEED` from the shell or `.env` | 0 | 0:00 |
+| `gateway-02` | 8 | 80 | 1:20 |
+| `gateway-03` | 9 | 160 | 2:40 |
+
+Started together, they stay a third of a cycle apart, so at any moment the three are at
+different points of the story. The seed sets the noise and where in its block each fault
+lands. Every time in this chapter is `gateway-01`'s, counted from its first message.
 
 **A demo device, not a statistical model.** Everything is scripted so that every feature of
 the service has a moment that triggers it, and this README can say when. The story repeats
@@ -274,12 +328,16 @@ the disk gains three points in two and a half minutes, which takes hours on real
 
 ### The four-minute story
 
-Times count from the first message at the default 1 Hz. Where a range is given, it is the
-spread over seeds 1–300: noise moves a threshold crossing by a second or two.
+Times count from `gateway-01`'s first message at the default 1 Hz. Where a range is given,
+it is the spread over seeds 1–300: noise moves a threshold crossing by a second or two.
+`gateway-02` joins the table at 1:20 and `gateway-03` at 2:40, and each goes on down it and
+round again. On that first pass, an episode already under way when the gateway starts
+appears once the gateway has sent the rule's run of readings, dated from its own first
+message.
 
 | At | What happens (the narration) | What the API shows |
 |---|---|---|
-| before 0:00 | the service is subscribed, the simulator not started | `system-status` returns 503 |
+| before 0:00 | the service is subscribed, `gateway-01` not started | `system-status` returns 503 |
 | 0:00 | gateway powered on; idle, background load only | `system-status` 200 with `device_id: gateway-01`; `messages_received` climbing in `/health` |
 | 0:30 | video-analytics batch starts: CPU, memory and network climb | |
 | 0:40–0:41 | CPU usage above 95% for the fifth message in a row | `/anomalies`: `cpu_usage_percent` ongoing |
@@ -354,19 +412,22 @@ particular branch:
 
 ### Same seed, same bytes
 
-Each frame depends only on the seed, the frame number and the send time. Noise and faults
-draw from two generators seeded per frame, so the send time reaches no reading: only the
-`timestamp` field and, through the payload's length, the bytes where `truncated` and
-`bit-flip` cut. The same `SIM_SEED` and settings therefore give the same readings in every
-run, and byte-identical payloads whenever the send time is the same too — in a dry run
-with `--start`; live frames carry the clock's time. Any frame can be computed on its own,
-and switching faults off (`SIM_FAULT_EVERY=0`) leaves every clean frame unchanged. Another
-seed moves threshold crossings by a second or two and puts each catalogue entry at a
-different spot in its block; the timeline above holds for all of them.
+Each frame depends only on the seed, its tick in the story and the send time, and the tick
+is the frame number plus `SIM_START_TICK`. Noise and faults draw from two generators seeded
+per tick, so the send time reaches no reading: only the `timestamp` field and, through the
+payload's length, the bytes where `truncated` and `bit-flip` cut. The same `SIM_SEED` and
+settings therefore give the same readings in every run, and byte-identical payloads
+whenever the send time is the same too — in a dry run with `--start`; live frames carry the
+clock's time. Any frame can be computed on its own, and switching faults off
+(`SIM_FAULT_EVERY=0`) leaves every clean frame unchanged. A start tick only shifts the
+stream: with the same seed, a device started at tick 80 sends the readings that one started
+at 0 sends from its 81st frame on. Another seed moves threshold crossings by a second or two
+and puts each catalogue entry at a different spot in its block; the timeline above holds
+for all of them.
 
 ### Narration
 
-`docker compose logs -f simulator` reads as a running commentary. Seed 7's first 34 seconds,
+`docker compose logs -f gateway-01` reads as a running commentary. Seed 7's first 34 seconds,
 with the log prefixes removed:
 
 ```text
@@ -380,7 +441,9 @@ tick 33: fault rtc-reset (RTC backup cell is flat, the clock restarted at 2000-0
 ```
 
 The API folds both kinds of timestamp substitution into one counter; the narration is where
-`rtc-reset`, `epoch-millis` and `http-date` can be told apart.
+`rtc-reset`, `epoch-millis` and `http-date` can be told apart. `gateway-02` and `gateway-03`
+narrate the same way from tick 80 and tick 160. The power-on line belongs to tick 0, so only
+`gateway-01` prints it.
 
 ### Dry run
 
@@ -408,7 +471,8 @@ Line 58 of `day.jsonl` is frame 57, mid-batch:
 
 In live mode the timestamps come from the clock and carry microseconds
 (`2026-10-19T08:00:57.123456+00:00`); the service normalises them to `Z`. `sequence` is the
-frame number and never resets; the service does not use it.
+story tick, the frame number plus `SIM_START_TICK`, and does not reset while the simulator
+runs; the service does not use it.
 
 ### Why it is built this way
 
@@ -429,10 +493,10 @@ frame number and never resets; the service does not use it.
 
 ### Settings
 
-The MQTT variables are the service's own, so one `.env` serves both containers; the
-simulator's own knobs carry a `SIM_` prefix. A bad value fails at startup naming the
-variable and what it accepts, not at message 300 — and not from inside a dependency
-either: `LOG_LEVEL=WARN` used to die in uvicorn's `configure_logging` with
+The MQTT variables are the service's own, so one `.env` serves the service and every
+gateway; the simulator's own knobs carry a `SIM_` prefix. A bad value fails at startup
+naming the variable and what it accepts, not at message 300 — and not from inside a
+dependency either: `LOG_LEVEL=WARN` used to die in uvicorn's `configure_logging` with
 `KeyError: 'warn'`, a traceback that mentions neither the variable nor the value.
 
 | Variable | Default | Meaning |
@@ -446,11 +510,16 @@ either: `LOG_LEVEL=WARN` used to die in uvicorn's `configure_logging` with
 | `SIM_RATE_HZ` | `1` | 0.1–10; a higher rate fast-forwards the story |
 | `SIM_SEED` | `7` | any integer; same seed and settings, same readings (same bytes in a dry run with `--start`) |
 | `SIM_FAULT_EVERY` | `10` | one catalogue entry per N messages; `0` turns injection off, `1` is rejected |
+| `SIM_START_TICK` | `0` | 0–239; the story tick of the first frame, so the device joins the four-minute story part-way, with the uptime and `sequence` it would have there |
 | `LOG_LEVEL` | `INFO` | `CRITICAL` `ERROR` `WARNING` `INFO` `DEBUG`, plus `WARN`, `FATAL` and `TRACE`; case-insensitive |
 
-Compose passes `SIM_SEED` and `SIM_FAULT_EVERY` through from the shell or `.env`, so
-`SIM_SEED=11 docker compose up -d simulator` replays the story with different noise and
-different fault positions.
+Compose passes `SIM_SEED` (to `gateway-01` only) and `SIM_FAULT_EVERY` (to all three)
+through from the shell or `.env`, so `SIM_SEED=11 docker compose up -d gateway-01` replays
+`gateway-01`'s story with different noise and different fault positions. The other seeds,
+and every gateway's device id and start tick, are written in compose.yaml, one service per
+gateway. To add a device, copy a gateway's service and give the copy its own name,
+`SIM_DEVICE_ID`, seed and start tick. The tests and CI check for exactly these three
+gateways, so a fourth means updating them as well.
 
 ## Design decisions
 
@@ -628,16 +697,24 @@ agree. Its Dockerfile sets `STOPSIGNAL SIGINT`: Python turns SIGINT into
 where a SIGTERM to a PID 1 with no handler for it would be ignored until Docker kills the
 container ten seconds later.
 
+**One definition, three gateways.** compose.yaml describes the simulator container once, in
+an `x-simulator` block (compose ignores top-level keys that start with `x-`) that holds the
+build and the wait for a healthy service. Each gateway service takes it with
+`<<: *simulator` and adds only its own `environment`. The variables all three need sit in a
+second block, `x-simulator-env`, merged inside each `environment`: YAML's `<<` merge is
+shallow, so an `environment` in `x-simulator` would be replaced whole by the gateway's own.
+Each gateway builds its own image from `simulator/`.
+
 **Readiness, not liveness.** The service's compose healthcheck passes once `/health`
 reports `broker_connected: true`. `/health` itself always answers 200 — "the process is
 alive" and "it has a source" are different questions — so the check is a readiness gate:
-`--wait` and the simulator's `depends_on: condition: service_healthy` use it, which makes
-0:00 of the story a moment when the service is already subscribed. Plain Docker never
+`--wait` and the gateways' shared `depends_on: condition: service_healthy` use it, so each
+gateway's first message goes out when the service is already subscribed. Plain Docker never
 restarts a container for being unhealthy, and the check allows 12 failures five seconds
 apart, so a broker outage longer than a minute marks the service unhealthy and nothing
-restarts it. It does not use `messages_received > 0`, which would mark the service
-unhealthy whenever the simulator stops. The image has no curl, so the check is one line of
-Python.
+restarts it. It does not use `messages_received > 0`, which would keep the service
+unhealthy until a gateway had published, while the gateways wait for it to be healthy
+before they start. The image has no curl, so the check is one line of Python.
 
 The containers share compose's project network and reach the broker by its service name,
 `broker`, rather than through `host.docker.internal`, which does not exist on stock Linux
@@ -667,6 +744,10 @@ programs are under `.venv/Scripts/`.)
 its own: `on_message` reads only `.topic` and `.payload`, so a small fake stands in for
 paho's message. The simulator's story, rotation, settings, dry run and publisher are
 unit-tested the same way in `tests/test_simulator.py`, with a stand-in for paho's client.
+`tests/test_compose.py` reads compose.yaml with PyYAML, which resolves the `<<` merges, and
+checks what each gateway ends up with: the gateways are exactly `gateway-01`, `gateway-02`
+and `gateway-03`, each keeps the shared broker settings and the wait for a healthy service,
+each device id is its service's name, and no two share a seed or a start tick.
 
 **The contract test.** `tests/test_simulator_contract.py` is the one place that runs the
 simulator's output through the real service. (`tests/test_simulator.py` crosses the line
@@ -681,10 +762,12 @@ all six rules are ongoing; and the default device's endpoints through FastAPI's 
 including the 503 and staleness (`/health` is covered in `tests/test_api.py`). Change either side and this file names the promise that broke.
 
 One end-to-end smoke test (`tests/test_smoke.py`) drives the real ingestor against the
-compose broker and simulator. It skips itself when nothing is listening on port 1883, so
-on a machine with no Docker pytest reports it as skipped and everything else passes. (On
-Windows two time-zone tests are skipped as well: they need `time.tzset()`, which only
-exists on Linux and macOS.) To run it:
+compose broker and gateways. It waits until all three gateways have sent valid readings,
+then checks that the service lists exactly those three devices and that every payload names
+the device its topic does (`device_id_mismatch` is 0 for each). It skips itself when nothing
+is listening on port 1883, so on a machine with no Docker pytest reports it as skipped and
+everything else passes. (On Windows two time-zone tests are skipped as well: they need
+`time.tzset()`, which only exists on Linux and macOS.) To run it:
 
 ```bash
 docker compose up -d --build --wait
@@ -721,9 +804,11 @@ code against its own constant and therefore verifies nothing.
 
 **CI runs all of this on every push** ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)):
 the full suite on Python 3.11, 3.12, 3.13 and 3.14; the quick-start compose stack, checking
-that the service container answers `/api/v1/system-status` with the simulator's telemetry
-and that the smoke test actually ran rather than skipped (pytest exits 0 when its only test
-is skipped); and mutmut over `validation.py`, which fails on any mutant that is not killed.
+that the service container lists all three gateways in `/api/v1/devices`, none of them
+stale and each with messages received, that the smoke test actually ran rather than skipped
+(pytest exits 0 when its only test is skipped), and that a gateway stopped with
+`docker compose stop` turns stale there while the other two do not; and mutmut over
+`validation.py`, which fails on any mutant that is not killed.
 
 ## Load
 
@@ -738,12 +823,13 @@ and the four default-device endpoints from several workers and reports per-endpo
 latency, but the check that matters is the ingestion one: **every endpoint takes a
 non-reentrant lock the MQTT ingest thread also needs**, so a read-heavy load could in
 principle starve the writer and make the service drop telemetry while still answering 200
-to everything — invisible from the HTTP side. The script therefore compares
-`messages_received` before and after against the publisher's 1 Hz.
+to everything — invisible from the HTTP side. The script therefore counts the devices that
+`/api/v1/devices` shows as not stale and compares `messages_received` before and after
+against one message per second for each of them; it fails at once if there are none.
 
-Measured on the compose stack, 12-core macOS host, 1 Hz publisher, after four hours of
-uptime so the window was full at 3600 samples. Client and server are on the same machine,
-so every request crosses Docker Desktop's port forwarding:
+Measured on the compose stack while it ran a single 1 Hz publisher, 12-core macOS host,
+after four hours of uptime so the window was full at 3600 samples. Client and server are on
+the same machine, so every request crosses Docker Desktop's port forwarding:
 
 | workers | throughput | `statistics` p50 | other endpoints p50 | errors | ingestion |
 |---:|---:|---:|---:|---:|---:|
@@ -798,7 +884,7 @@ anonymous clients and is bound to `127.0.0.1`. To require a login, set
 how), mount the password file in the broker's `volumes` in `compose.yaml` (only
 `mosquitto.conf` is mounted today), and put `MQTT_USERNAME` and `MQTT_PASSWORD` in a `.env`
 file next to `compose.yaml`. Compose reads `.env` on its own and hands both values to the
-service and the simulator. `.env` is gitignored and never committed. An empty value counts
+service and every gateway. `.env` is gitignored and never committed. An empty value counts
 as unset, and a password without a username fails at startup rather than being silently
 dropped.
 
@@ -813,7 +899,7 @@ dropped.
   fault all assume the defaults. The tests pin the defaults, and across seeds they assert
   only what holds for every seed.
 - Timestamps come from the simulator's clock and are judged against the service's clock at
-  receipt. In compose both containers read the same kernel clock (the virtual machine's, on
+  receipt. In compose every container reads the same kernel clock (the virtual machine's, on
   Docker Desktop), so they agree to within milliseconds whatever that clock does: if it
   drifts from the host's after a laptop sleeps, both sides move together and the
   60-second skew check never fires. That agreement is the only reason the threshold is
@@ -822,9 +908,12 @@ dropped.
   environment or the smoke test's in-process ingestor: it reads the host's clock while the
   simulator reads the virtual machine's, and once those differ by more than 60 s every
   timestamp is replaced by the receipt time. Restarting Docker Desktop fixes that.
-- Restarting the simulator while the service runs restarts its frame counter and uptime:
-  the service counts one more `uptime_regressed` and the story starts over. That is correct
-  — to the service, the device rebooted.
+- Restarting a gateway while the service runs starts its story over from its start tick,
+  with the uptime that tick has: 0 s for `gateway-01`, 80 s for `gateway-02`, 160 s for
+  `gateway-03`. The service counts one more `uptime_regressed` only when that is below the
+  last uptime it had from the device: almost always for `gateway-01`, and for the other two
+  only if they stopped with more uptime than they start with. That is correct — to the
+  service, a device rebooted only if its uptime went backwards.
 - The two kinds of timestamp substitution share one `timestamp_substituted` counter, and
   `system-status` shows `timestamp_source` only until the next good message. The
   simulator's narration tells them apart.
@@ -835,11 +924,13 @@ dropped.
   an episode ends only on a message that no longer breaks the rule, and silence is not one.
   Its readings in `system-status` do go stale, and `/api/v1/devices` shows how long it has
   been quiet.
-- Compose passes only the credentials, `SIM_SEED` and `SIM_FAULT_EVERY` through from
-  `.env`. To rename the device, add `SIM_DEVICE_ID` to the simulator's `environment` in
-  compose.yaml and, so that the paths without a device in them follow it, the same value as
-  `DEFAULT_DEVICE_ID` to the service's. The topic follows on its own: the simulator fills the
-  `+` in `MQTT_TOPIC` with its id.
+- Compose passes only the credentials, `SIM_SEED` (to `gateway-01` alone) and
+  `SIM_FAULT_EVERY` through from `.env`. To rename `gateway-01`, change its `SIM_DEVICE_ID`
+  in compose.yaml and, so that the paths without a device in them follow it, add the same
+  value as `DEFAULT_DEVICE_ID` to the service's `environment`. The topic follows on its own:
+  the simulator fills the `+` in `MQTT_TOPIC` with its id. The tests and CI expect the names
+  `gateway-01` to `gateway-03`, for the services and the device ids alike, so a rename means
+  updating them as well.
 - The broker accepts anonymous clients and is bound to 127.0.0.1. Anywhere else, give it a
   password file and set credentials on both sides; the code already supports that.
 - `sequence` is advisory and nothing is deduplicated. Counters restart when a device
