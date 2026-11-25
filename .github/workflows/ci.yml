@@ -49,22 +49,35 @@ jobs:
           cache-dependency-path: requirements*.txt
       - name: Install dependencies
         run: pip install -r requirements-dev.txt
-      - name: Start broker, service and simulator (the README quick start)
+      - name: Start the broker, the service and the three gateways (the README quick start)
         run: docker compose up -d --build --wait
       # The smoke test brings its own ingestor; this checks the service
-      # container that the quick start actually starts.
-      - name: The service in the container receives the simulator's telemetry
+      # container that the quick start actually starts, and through it every
+      # gateway container: one that cannot reach the broker never shows up.
+      - name: The service in the container hears from all three gateways
         run: |
+          all_three_live() {
+            python - <<'EOF'
+          import json
+          import sys
+
+          with open("devices.json") as f:
+              rows = json.load(f)["devices"]
+          ids = sorted(row["device_id"] for row in rows)
+          live = all(not row["stale"] and row["messages_received"] > 0 for row in rows)
+          sys.exit(0 if ids == ["gateway-01", "gateway-02", "gateway-03"] and live else 1)
+          EOF
+          }
           for attempt in $(seq 1 30); do
-            if curl -fsS --max-time 5 http://127.0.0.1:8000/api/v1/system-status -o status.json \
-              && python -c "import json, sys; body = json.load(open('status.json')); sys.exit(0 if body['device_id'] == 'gateway-01' else 1)"; then
-              echo "system-status answered 200 for gateway-01 after ${attempt} attempt(s)"
+            if curl -fsS --max-time 5 http://127.0.0.1:8000/api/v1/devices -o devices.json \
+              && all_three_live; then
+              echo "gateway-01, gateway-02 and gateway-03 are live after ${attempt} attempt(s)"
               exit 0
             fi
             sleep 1
           done
-          echo "system-status did not answer 200 for gateway-01 within 30 s:"
-          curl -sS --max-time 5 http://127.0.0.1:8000/api/v1/system-status || true
+          echo "/api/v1/devices did not show gateway-01, gateway-02 and gateway-03 live within 30 s:"
+          curl -sS --max-time 5 http://127.0.0.1:8000/api/v1/devices || true
           exit 1
       - name: Smoke test against the running stack
         run: python -m pytest -m smoke -q --junitxml=smoke.xml
@@ -83,10 +96,37 @@ jobs:
           if counts != {"tests": 1, "skipped": 0, "failures": 0, "errors": 0}:
               sys.exit(1)
           EOF
+      # The service marks a device stale once 30 s (STALE_AFTER_SECONDS) pass
+      # without a message from it. Stopping one gateway must leave that one,
+      # and only that one, stale.
+      - name: A stopped gateway goes stale while the others stay live
+        run: |
+          only_gateway_03_stale() {
+            python - <<'EOF'
+          import json
+          import sys
+
+          with open("devices.json") as f:
+              stale = {row["device_id"]: row["stale"] for row in json.load(f)["devices"]}
+          sys.exit(0 if stale == {"gateway-01": False, "gateway-02": False, "gateway-03": True} else 1)
+          EOF
+          }
+          docker compose stop gateway-03
+          for attempt in $(seq 1 60); do
+            if curl -fsS --max-time 5 http://127.0.0.1:8000/api/v1/devices -o devices.json \
+              && only_gateway_03_stale; then
+              echo "gateway-03 is stale and gateway-01 and gateway-02 are live after ${attempt} attempt(s)"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "/api/v1/devices did not show gateway-03 alone stale within 60 s:"
+          curl -sS --max-time 5 http://127.0.0.1:8000/api/v1/devices || true
+          exit 1
       - name: Show containers and logs
         if: failure()
         run: |
-          docker compose ps
+          docker compose ps -a
           docker compose logs --no-color
       - name: Stop the stack
         if: always()
