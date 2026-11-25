@@ -247,9 +247,23 @@ def test_the_load_test_counts_the_live_devices_in_the_service_s_device_list(ages
     assert stress.live_devices(_device_list(ages)) == live
 
 
+def test_the_load_test_has_a_per_device_rate_and_no_fixed_one():
+    stress = _load_stress_test_module()
+    assert stress.MIN_INGEST_RATE_PER_DEVICE == 0.8
+    assert not hasattr(stress, "MIN_INGEST_RATE")
+
+
+def test_the_load_test_refuses_to_run_with_no_live_device():
+    stress = _load_stress_test_module()
+    with pytest.raises(SystemExit, match="^no device is publishing"):
+        stress.ingest_floor(0)
+
+
 def test_the_load_test_s_ingest_floor_is_per_live_device():
     # One fixed floor, set when there was a single publisher, would let a
     # three-device fleet lose most of its messages and still pass.
     stress = _load_stress_test_module()
-    assert stress.MIN_INGEST_RATE_PER_DEVICE == 0.8
-    assert not hasattr(stress, "MIN_INGEST_RATE")
+    assert stress.ingest_floor(1) == 0.8
+    assert stress.ingest_floor(3) == pytest.approx(2.4)
+    # Three devices at one message a second each, with two thirds lost.
+    assert stress.ingest_floor(3) > 1.0

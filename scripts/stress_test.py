@@ -140,6 +140,19 @@ def live_devices(body: dict) -> int:
     return sum(1 for row in body["devices"] if not row["stale"])
 
 
+def ingest_floor(live: int) -> float:
+    """The slowest fleet-wide ingest rate that still passes, for `live` devices.
+
+    Each live device is allowed MIN_INGEST_RATE_PER_DEVICE messages a second.
+    With no live device there is nothing to measure, so it stops the run.
+    """
+    if live == 0:
+        raise SystemExit(
+            "no device is publishing: /api/v1/devices lists no live device - is the stack running?"
+        )
+    return MIN_INGEST_RATE_PER_DEVICE * live
+
+
 def worker(base: str, deadline: float, interval: float, timeout: float, out: list[Result]) -> None:
     client = Client(base, timeout)
     index = 0
@@ -193,11 +206,10 @@ def main() -> int:
     # Counted once, before the load: a device that goes quiet during the run
     # must fail the ingest check, not lower its bar.
     live = live_devices(devices(base))
-    if live == 0:
-        raise SystemExit(
-            "no device is publishing: /api/v1/devices lists no live device - is the stack running?"
-        )
-    min_rate = MIN_INGEST_RATE_PER_DEVICE * live
+    # Rounded to the two decimals it is printed with, so the comparison and the
+    # message agree: 0.8 * 3 is 2.4000000000000004, and a rate of exactly 2.40/s
+    # must not fail with "2.40/s is below 2.40/s".
+    min_rate = round(ingest_floor(live), 2)
     print(f"target       {base}")
     print(f"load         {args.concurrency} workers x {args.duration:.0f}s, interval {args.interval}s")
     print(f"at start     {before['messages_received']} messages ingested, "
