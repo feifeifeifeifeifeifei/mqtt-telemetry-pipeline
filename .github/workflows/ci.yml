@@ -93,7 +93,11 @@ jobs:
           suite = root if root.tag == "testsuite" else root.find("testsuite")
           counts = {key: int(suite.get(key, 0)) for key in ("tests", "skipped", "failures", "errors")}
           print(counts)
-          if counts != {"tests": 1, "skipped": 0, "failures": 0, "errors": 0}:
+          # At least one ran, none skipped, none failed. Pinning tests == 1
+          # would turn "somebody added a second smoke test" into a red build
+          # with a message about counts, which is not what this gate is for:
+          # it exists because pytest exits 0 when its only test is skipped.
+          if counts["tests"] < 1 or any(counts[key] for key in ("skipped", "failures", "errors")):
               sys.exit(1)
           EOF
       # The service marks a device stale once 30 s (STALE_AFTER_SECONDS) pass
