@@ -9,7 +9,8 @@ still answering 200 to everything. That would be invisible from the HTTP side,
 which is exactly the kind of failure this project has been trying to avoid.
 
 So the pass/fail that matters is the ingestion check: messages_received must
-keep climbing at the publisher's rate throughout.
+keep climbing at the fleet's rate throughout, one message a second from each
+device that is live when the run starts.
 
 Usage:
     python3 scripts/stress_test.py                       # 30 s, 8 workers
@@ -18,7 +19,7 @@ Usage:
 
 Read the numbers as a shape, not a score. If throughput FALLS as workers rise,
 that is the signature of oversubscription rather than of a service in trouble,
-provided every check still passes and ingestion stays at the publisher's rate:
+provided every check still passes and ingestion stays at the fleet's rate:
 the service is one Python process, so its ceiling is one core - the GIL - not
 the store's lock (held for microseconds) and not the host.
 
@@ -57,9 +58,12 @@ ENDPOINTS = [
     "/api/v1/anomalies",
 ]
 
-# The publisher runs at 1 Hz. Allow for the request that straddles a second
-# boundary at each end, plus a little slack on a loaded machine.
-MIN_INGEST_RATE = 0.8
+# Each device publishes at 1 Hz, the simulator's SIM_RATE_HZ default, so the
+# fleet sends one message a second per live device. Allow for the request that
+# straddles a second boundary at each end, plus a little slack on a loaded
+# machine. The floor is per device because each device's messages straddle
+# those boundaries on their own.
+MIN_INGEST_RATE_PER_DEVICE = 0.8
 
 Result = collections.namedtuple("Result", "endpoint status seconds")
 
@@ -107,15 +111,33 @@ class Client:
             self._connection = None
 
 
-def health(base: str, timeout: float = 10.0) -> dict:
+def _get_json(base: str, path: str, timeout: float) -> dict:
     client = Client(base, timeout)
     try:
-        status, _, body = client.get("/health")
+        status, _, body = client.get(path)
         if status != 200:
-            raise SystemExit(f"service is not answering /health (status {status}) - is it running?")
+            raise SystemExit(f"service is not answering {path} (status {status}) - is it running?")
         return json.loads(body)
     finally:
         client.close()
+
+
+def health(base: str, timeout: float = 10.0) -> dict:
+    return _get_json(base, "/health", timeout)
+
+
+def devices(base: str, timeout: float = 10.0) -> dict:
+    """The service's device list: every device it holds state for."""
+    return _get_json(base, "/api/v1/devices", timeout)
+
+
+def live_devices(body: dict) -> int:
+    """How many devices in an /api/v1/devices body are publishing now.
+
+    The service marks a device stale once its last message is older than
+    STALE_AFTER_SECONDS (30 by default), and also before its first message.
+    """
+    return sum(1 for row in body["devices"] if not row["stale"])
 
 
 def worker(base: str, deadline: float, interval: float, timeout: float, out: list[Result]) -> None:
@@ -168,10 +190,18 @@ def main() -> int:
 
     base = args.url.rstrip("/")
     before = health(base)
+    # Counted once, before the load: a device that goes quiet during the run
+    # must fail the ingest check, not lower its bar.
+    live = live_devices(devices(base))
+    if live == 0:
+        raise SystemExit(
+            "no device is publishing: /api/v1/devices lists no live device - is the stack running?"
+        )
+    min_rate = MIN_INGEST_RATE_PER_DEVICE * live
     print(f"target       {base}")
     print(f"load         {args.concurrency} workers x {args.duration:.0f}s, interval {args.interval}s")
     print(f"at start     {before['messages_received']} messages ingested, "
-          f"uptime {before['uptime_seconds']:.0f}s\n")
+          f"uptime {before['uptime_seconds']:.0f}s, {live} live device(s)\n")
 
     results: list[Result] = []
     buckets = [[] for _ in range(args.concurrency)]
@@ -215,12 +245,13 @@ def main() -> int:
     print(f"\n{len(results)} requests in {elapsed:.1f}s = {len(results) / elapsed:.0f} req/s")
     print(f"status codes {dict(statuses)}")
     print(f"ingested     {ingested} messages during the run = {rate:.2f}/s "
-          f"(publisher runs at 1.00/s)")
+          f"({live} publisher(s) at 1.00/s each)")
 
     checks = [
         ("no failed requests", total_errors == 0, f"{total_errors} non-200 responses"),
-        ("ingestion kept up", rate >= MIN_INGEST_RATE,
-         f"{rate:.2f}/s is below {MIN_INGEST_RATE}/s - the read load is starving the writer"),
+        ("ingestion kept up", rate >= min_rate,
+         f"{rate:.2f}/s is below {min_rate:.2f}/s ({MIN_INGEST_RATE_PER_DEVICE}/s for each of "
+         f"{live} live device(s)) - the read load is starving the writer"),
         ("broker still connected", after["broker_connected"], "the ingestor lost its connection"),
     ]
     print()

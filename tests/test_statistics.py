@@ -210,3 +210,46 @@ def test_the_load_test_reports_the_same_median_as_the_service(n):
     stress = _load_stress_test_module()
     values = [float(i) for i in range(n)]
     assert stress.median(values) == _median(sorted(values))
+
+
+# The script also reads the service's device list, to know how many messages a
+# second the ingest check should expect. It parses that JSON on its own, so
+# these tests hand it the body the service really sends.
+
+
+def _device_list(ages):
+    """The service's own /api/v1/devices body, one device per entry in ages:
+    seconds since its last message, or None for a device not yet heard from."""
+    import time
+
+    from fastapi.testclient import TestClient
+
+    from api import create_app
+    from telemetry.fleet import DeviceRegistry, FleetCounters
+
+    registry = DeviceRegistry()
+    for index, age in enumerate(ages, start=1):
+        store = registry.get_or_create(f"gateway-{index:02d}")
+        if age is not None:
+            store.record_payload_error("undecodable", received_mono=time.monotonic() - age)
+    return TestClient(create_app(registry, FleetCounters())).get("/api/v1/devices").json()
+
+
+@pytest.mark.parametrize(
+    "ages, live",
+    [([], 0), ([0.0, 60.0, None, 5.0, 1.0], 3), ([60.0, None], 0)],
+    ids=["no-devices", "mixed", "all-stale"],
+)
+def test_the_load_test_counts_the_live_devices_in_the_service_s_device_list(ages, live):
+    # A stale device is not publishing, so counting it would make the ingest
+    # check wait for messages that are not coming.
+    stress = _load_stress_test_module()
+    assert stress.live_devices(_device_list(ages)) == live
+
+
+def test_the_load_test_s_ingest_floor_is_per_live_device():
+    # One fixed floor, set when there was a single publisher, would let a
+    # three-device fleet lose most of its messages and still pass.
+    stress = _load_stress_test_module()
+    assert stress.MIN_INGEST_RATE_PER_DEVICE == 0.8
+    assert not hasattr(stress, "MIN_INGEST_RATE")
